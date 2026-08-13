@@ -1,0 +1,42 @@
+async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    cart = context.user_data.get("cart")
+    if not cart:
+        await query.message.reply_text("🛒 Кошик порожній")
+        return
+
+    user = update.effective_user
+    username = get_username(user)
+    total = sum(item["price"] for item in cart)
+
+    # ===== Повідомлення для тебе (власника) =====
+    owner_text = (
+        "🆕 НОВЕ ЗАМОВЛЕННЯ\n\n"
+        f"👤 Клієнт: {user.full_name}\n"
+        f"🔗 Username: {username}\n\n"
+    )
+
+    for item in cart:
+        owner_text += f"• {item['name']} — {item['price']} €\n"
+
+    owner_text += f"\n💰 Сума: {total} €"
+
+    await context.bot.send_message(
+        chat_id=OWNER_ID,
+        text=owner_text,
+    )
+
+    # ===== Повідомлення клієнту =====
+    client_text = (
+        "✅ Ваше замовлення прийнято!\n\n"
+        "📦 Для узгодження доставки та деталей, будь ласка, "
+        "звʼяжіться з курʼєром:\n\n"
+        f"👉 {COURIER_USERNAME}\n\n"
+        "Дякуємо за замовлення!"
+    )
+
+    await query.message.reply_text(client_text)
+
+    context.user_data.clear()
