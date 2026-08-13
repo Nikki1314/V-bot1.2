@@ -93,4 +93,3 @@ def load_catalog() -> dict[str, Any]:
         catalog["categories"] = {}
     catalog.setdefault("currency", "EUR")
     return catalog
-І
