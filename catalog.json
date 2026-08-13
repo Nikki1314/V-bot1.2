@@ -6,14 +6,15 @@
       "brands": {
         "elfliq": {
           "title": "🧪 ELFLIQ 5%",
-          "price_range": "19 EUR",
           "items": [
-            { "name": "🍎 Apple Peach", "price": 19 },
+            {
+              "name": "🍎 Apple Peach",
+              "price": 19
+            }
           ]
         },
         "chaser_lux": {
           "title": "⚡ CHASER LUX",
-          "price_range": "19-20 EUR",
           "items": [
             {
               "nicotine": "5%",
@@ -31,39 +32,45 @@
               "nicotine": "6.5%",
               "price": 20,
               "items": [
-                "🥝 Kiwi Passion Fruit Guava",
+                "🥝 Kiwi Passion Fruit Guava"
               ]
             }
           ]
         },
         "chaser_black": {
           "title": "⚫️ Chaser Black",
-          "price_range": "19 EUR",
           "items": [
-            { "name": "🍎 Apple Peach", "price": 19 },
+            {
+              "name": "🍎 Apple Peach",
+              "price": 19
+            }
           ]
         },
         "chaser_pods": {
           "title": "🦊 Chaser for Pods",
-          "price_range": "19 EUR",
           "items": [
-            { "name": "🍎 Apple Peach", "price": 19 },
+            {
+              "name": "🍎 Apple Peach",
+              "price": 19
+            }
           ]
         },
         "hqd_salt": {
           "title": "💨 HQD Salt 5%",
-          "price_range": "17 EUR",
           "items": [
-            { "name": "🍒 Cherry Ice", "price": 17 },
+            {
+              "name": "🍒 Cherry Ice",
+              "price": 17
+            }
           ]
-        },
+        }
+      }
+    },
     "devices": {
       "title": "🔌 Девайси",
-      "photo": "photos/Vaporesso.jpg",
       "brands": {
         "vaporesso_xros": {
           "title": "Vaporesso XROS",
-          "price_range": "20-52 EUR",
           "items": [
             { "name": "Vaporesso XROS 3 Mini", "price": 20 },
             { "name": "Vaporesso XROS 4 Mini", "price": 36 },
@@ -74,18 +81,23 @@
             { "name": "Vaporesso XROS Pro", "price": 50 },
             { "name": "Vaporesso XROS Pro 2", "price": 52 }
           ]
-        },
- "cartridges": {
-  "title": "🔧 Картриджі",
-  "brands": {
-    "xros": {
-      "title": "Vaporesso XROS",
-      "price_range": "8 EUR",
-      "items": [
-        { "name": "Картридж 0.4Ω", "price": 8 },
-        { "name": "Картридж 0.6Ω", "price": 8 },
-        { "name": "Картридж 0.8Ω", "price": 8 },
-        { "name": "Картридж 1.0Ω", "price": 8 },
-        { "name": "Картридж 1.2Ω", "price": 9 }
-      ]
+        }
+      }
     },
+    "cartridges": {
+      "title": "🔧 Картриджі",
+      "brands": {
+        "xros": {
+          "title": "Vaporesso XROS",
+          "items": [
+            { "name": "Картридж 0.4Ω", "price": 8 },
+            { "name": "Картридж 0.6Ω", "price": 8 },
+            { "name": "Картридж 0.8Ω", "price": 8 },
+            { "name": "Картридж 1.0Ω", "price": 8 },
+            { "name": "Картридж 1.2Ω", "price": 9 }
+          ]
+        }
+      }
+    }
+  }
+}
