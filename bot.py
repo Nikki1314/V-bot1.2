@@ -83,6 +83,12 @@ T = {
         "order_start": "📦 Оформлення замовлення\n\nВкажіть місто або район доставки:",
         "order_date": "📅 Вкажіть дату отримання у форматі ДД.ММ.РРРР.\nНаприклад: 25.08.2026",
         "order_time": "🕒 Вкажіть бажаний час отримання.\nНаприклад: 18:30 або 18:00-19:00",
+        "payment_question": "💳 Як бажаєте оплатити замовлення?",
+        "payment_card": "💳 Карта",
+        "payment_cash": "💵 Готівка",
+        "feedback": "⭐ Залишити відгук",
+        "feedback_prompt": "⭐ Напишіть ваш відгук одним повідомленням. Дякуємо!",
+        "feedback_sent": "✅ Дякуємо за ваш відгук! Ми отримали його.",
         "order_confirm": "Перевірте замовлення:",
         "confirm": "✅ Підтвердити",
         "cancel": "❌ Скасувати",
@@ -147,6 +153,12 @@ T = {
         "order_start": "📦 Оформление заказа\n\nУкажите город или район доставки:",
         "order_date": "📅 Укажите дату получения в формате ДД.ММ.ГГГГ.\nНапример: 25.08.2026",
         "order_time": "🕒 Укажите желаемое время получения.\nНапример: 18:30 или 18:00-19:00",
+        "payment_question": "💳 Как вы хотите оплатить заказ?",
+        "payment_card": "💳 Карта",
+        "payment_cash": "💵 Наличные",
+        "feedback": "⭐ Оставить отзыв",
+        "feedback_prompt": "⭐ Напишите ваш отзыв одним сообщением. Спасибо!",
+        "feedback_sent": "✅ Спасибо за ваш отзыв! Мы его получили.",
         "order_confirm": "Проверьте заказ:",
         "confirm": "✅ Подтвердить",
         "cancel": "❌ Отменить",
@@ -211,6 +223,12 @@ T = {
         "order_start": "📦 Bestellung\n\nBitte Stadt oder Bezirk für die Lieferung angeben:",
         "order_date": "📅 Bitte Lieferdatum im Format TT.MM.JJJJ eingeben.\nBeispiel: 25.08.2026",
         "order_time": "🕒 Gewünschte Lieferzeit eingeben.\nBeispiel: 18:30 oder 18:00-19:00",
+        "payment_question": "💳 Wie möchten Sie bezahlen?",
+        "payment_card": "💳 Karte",
+        "payment_cash": "💵 Barzahlung",
+        "feedback": "⭐ Bewertung abgeben",
+        "feedback_prompt": "⭐ Schreiben Sie Ihre Bewertung in einer Nachricht. Vielen Dank!",
+        "feedback_sent": "✅ Vielen Dank für Ihre Bewertung! Wir haben sie erhalten.",
         "order_confirm": "Bitte prüfen Sie Ihre Bestellung:",
         "confirm": "✅ Bestätigen",
         "cancel": "❌ Abbrechen",
@@ -275,6 +293,12 @@ T = {
         "order_start": "📦 Checkout\n\nPlease enter the delivery city or district:",
         "order_date": "📅 Enter the delivery date as DD.MM.YYYY.\nExample: 25.08.2026",
         "order_time": "🕒 Enter the preferred delivery time.\nExample: 18:30 or 18:00-19:00",
+        "payment_question": "💳 How would you like to pay?",
+        "payment_card": "💳 Card",
+        "payment_cash": "💵 Cash",
+        "feedback": "⭐ Leave a review",
+        "feedback_prompt": "⭐ Please write your review in one message. Thank you!",
+        "feedback_sent": "✅ Thank you for your review! We received it.",
         "order_confirm": "Please review your order:",
         "confirm": "✅ Confirm",
         "cancel": "❌ Cancel",
@@ -531,6 +555,7 @@ def main_keyboard(user_id: Optional[int]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(tr(user_id, "catalog"), callback_data="catalog")],
         [InlineKeyboardButton(tr(user_id, "cart"), callback_data="cart")],
+        [InlineKeyboardButton(tr(user_id, "feedback"), callback_data="feedback")],
         [InlineKeyboardButton(tr(user_id, "language"), callback_data="language")],
     ])
 
@@ -1034,7 +1059,8 @@ def order_preview(user: Any, cart: list[dict[str, Any]], data: dict[str, Any]) -
         f"💰 Разом: {price_text(cart_total(cart))}\n"
         f"📍 Місто/район: {data['city']}\n"
         f"📅 Дата отримання: {data['date']}\n"
-        f"🕒 Час: {data['time']}"
+        f"🕒 Час: {data['time']}\n"
+        f"💳 Оплата: {data.get('payment', 'не вказано')}"
     )
 
 
@@ -1058,6 +1084,57 @@ async def checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
+async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await answer_callback(update)
+    query = update.callback_query
+    method = query.data.split(":", 1)[1] if query and query.data else ""
+    flow = context.user_data.get("order_flow")
+    user = update.effective_user
+    if not isinstance(flow, dict) or flow.get("step") != "payment" or not user:
+        return
+
+    labels = {"card": tr(user.id, "payment_card"), "cash": tr(user.id, "payment_cash")}
+    if method not in labels:
+        return
+
+    flow["payment"] = labels[method]
+    flow["step"] = "confirm"
+    cart = cart_get(context)
+    preview = (
+        f"{tr(user.id, 'order_confirm')}\n\n"
+        f"📍 {flow['city']}\n"
+        f"📅 {flow['date']}\n"
+        f"🕒 {flow['time']}\n"
+        f"💳 {labels[method]}\n\n"
+        + "\n".join(f"• {item['name']} — {price_text(item['price'])}" for item in cart)
+        + f"\n\n💰 {tr(user.id, 'total')}: {price_text(cart_total(cart))}"
+    )
+    await show_text(update, preview, InlineKeyboardMarkup([
+        [InlineKeyboardButton(tr(user.id, "confirm"), callback_data="order:confirm")],
+        [InlineKeyboardButton(tr(user.id, "cancel"), callback_data="order:cancel")],
+    ]))
+
+
+async def feedback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await answer_callback(update)
+    user = update.effective_user
+    if not user:
+        return
+    context.user_data["feedback_flow"] = True
+    await show_text(update, tr(user.id, "feedback_prompt"), InlineKeyboardMarkup([
+        [InlineKeyboardButton(tr(user.id, "cancel"), callback_data="feedback:cancel")]
+    ]))
+
+
+async def feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await answer_callback(update)
+    query = update.callback_query
+    action = query.data.split(":", 1)[1] if query and query.data else ""
+    if action == "cancel":
+        context.user_data.pop("feedback_flow", None)
+        await show_text(update, tr(update.effective_user.id, "menu"), main_keyboard(update.effective_user.id))
+
+
 async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await answer_callback(update)
     query = update.callback_query
@@ -1077,7 +1154,7 @@ async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         cart = cart_get(context)
         user = update.effective_user
 
-        if not isinstance(flow, dict) or not user or not cart:
+        if not isinstance(flow, dict) or not user or not cart or not flow.get("payment"):
             await show_text(update, tr(update.effective_user.id, "order_failed"))
             return
 
@@ -1091,28 +1168,33 @@ async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "language": get_user_language(user.id),
             "items": cart,
             "total": cart_total(cart),
+            "payment": flow["payment"],
             "delivery": {
                 "city_or_district": flow["city"],
                 "date": flow["date"],
                 "time": flow["time"],
             },
             "created_at": now.isoformat(timespec="seconds"),
+            "status": "new",
         }
 
-        text = order_preview(user, cart, flow)
-        delivered = True
-        for admin_id in ORDER_ADMIN_IDS:
-            try:
-                await context.bot.send_message(chat_id=admin_id, text=text)
-            except Exception:
-                delivered = False
-                logger.exception("Cannot send order to %s", admin_id)
-
-        if not delivered:
+        if not save_order(order):
+            logger.error("Cannot save order %s", order_id)
             await show_text(update, tr(user.id, "order_failed"))
             return
 
-        save_order(order)
+        text = order_preview(user, cart, flow)
+        delivered_count = 0
+        for admin_id in ORDER_ADMIN_IDS:
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=text)
+                delivered_count += 1
+            except Exception:
+                logger.exception("Cannot send order %s to admin %s", order_id, admin_id)
+
+        if delivered_count == 0:
+            logger.error("Order %s was saved but no admin notification was delivered", order_id)
+
         context.user_data["cart"] = []
         context.user_data.pop("order_flow", None)
 
@@ -1845,6 +1927,30 @@ async def customer_text_router(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_text_router(update, context)
         return
 
+    if context.user_data.get("feedback_flow"):
+        user = update.effective_user
+        feedback = update.message.text.strip()
+        if not feedback:
+            return
+        delivered = 0
+        feedback_text = (
+            "⭐ НОВИЙ ВІДГУК\n\n"
+            f"👤 {user.full_name}\n"
+            f"🔗 @{user.username}\n" if user.username else f"👤 {user.full_name}\n"
+        ) + f"🆔 Telegram ID: {user.id}\n\n💬 {feedback}"
+        for admin_id in ORDER_ADMIN_IDS:
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=feedback_text)
+                delivered += 1
+            except Exception:
+                logger.exception("Cannot send feedback to %s", admin_id)
+        context.user_data.pop("feedback_flow", None)
+        if delivered:
+            await update.message.reply_text(tr(user.id, "feedback_sent"), reply_markup=main_keyboard(user.id))
+        else:
+            await update.message.reply_text(tr(user.id, "order_failed"), reply_markup=main_keyboard(user.id))
+        return
+
     flow = context.user_data.get("order_flow")
     if not isinstance(flow, dict):
         return
@@ -1878,34 +1984,18 @@ async def customer_text_router(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(tr(user_id, "bad_time"))
             return
         flow["time"] = text
-        flow["step"] = "confirm"
-
-        cart = cart_get(context)
-        preview = (
-            f"{tr(user_id, 'order_confirm')}\n\n"
-            f"📍 {flow['city']}\n"
-            f"📅 {flow['date']}\n"
-            f"🕒 {flow['time']}\n\n"
-            + "\n".join(
-                f"• {item['name']} — {price_text(item['price'])}"
-                for item in cart
-            )
-            + f"\n\n💰 {tr(user_id, 'total')}: {price_text(cart_total(cart))}"
-        )
-
+        flow["step"] = "payment"
         await update.message.reply_text(
-            preview,
+            tr(user_id, "payment_question"),
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    tr(user_id, "confirm"),
-                    callback_data="order:confirm"
-                )],
-                [InlineKeyboardButton(
-                    tr(user_id, "cancel"),
-                    callback_data="order:cancel"
-                )],
+                [InlineKeyboardButton(tr(user_id, "payment_card"), callback_data="payment:card")],
+                [InlineKeyboardButton(tr(user_id, "payment_cash"), callback_data="payment:cash")],
+                [InlineKeyboardButton(tr(user_id, "cancel"), callback_data="order:cancel")],
             ]),
         )
+        return
+
+
 
 
 # ============================================================
@@ -1977,6 +2067,9 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(clear_cart_handler, pattern=r"^clear_cart$"))
     app.add_handler(CallbackQueryHandler(checkout_handler, pattern=r"^checkout$"))
     app.add_handler(CallbackQueryHandler(order_callback, pattern=r"^order:"))
+    app.add_handler(CallbackQueryHandler(payment_callback, pattern=r"^payment:"))
+    app.add_handler(CallbackQueryHandler(feedback_handler, pattern=r"^feedback$"))
+    app.add_handler(CallbackQueryHandler(feedback_callback, pattern=r"^feedback:"))
 
     # Admin main callbacks
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^adm:"))
