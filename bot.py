@@ -20,24 +20,68 @@ from telegram.ext import (
 )
 
 # ============================================================
-# CONFIG
+# 1. CONFIGURATION
 # ============================================================
+# Усі критичні параметри читаються ЛИШЕ зі змінних середовища.
+# Токен та ID адміністраторів ніколи не зашиваються в код напряму.
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", BASE_DIR))
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_data_dir() -> Path:
+    """Визначає директорію для постійного зберігання даних.
+
+    Порядок пріоритету:
+      1. DATA_DIR (явно вказана директорія)
+      2. RAILWAY_VOLUME_MOUNT_PATH (змонтований persistent volume Railway)
+      3. локальна папка ./data (для розробки на своїй машині)
+
+    Директорія створюється автоматично, якщо її ще не існує.
+    """
+    candidate = os.getenv("DATA_DIR") or os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+    path = Path(candidate) if candidate else (BASE_DIR / "data")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+DATA_DIR = resolve_data_dir()
 
 SEED_CATALOG_PATH = BASE_DIR / "catalog.json"
 CATALOG_PATH = DATA_DIR / "catalog.json"
 ORDERS_PATH = DATA_DIR / "orders.json"
 USERS_PATH = DATA_DIR / "users.json"
+REVIEWS_PATH = DATA_DIR / "reviews.json"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = 7212962967
-ORDER_ADMIN_IDS = (7212962967, 5522897576)
-
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
+
+
+def parse_admin_ids() -> set[int]:
+    """Читає список ID адміністраторів зі змінної середовища ADMIN_IDS.
+
+    Формат: список ID через кому, напр. "7212962967,5522897576".
+    Якщо змінна не задана — використовується резервний список,
+    що зберігає сумісність із попередньою версією бота.
+    """
+    raw = os.getenv("ADMIN_IDS", "")
+    ids = set()
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if chunk.isdigit():
+            ids.add(int(chunk))
+    if not ids:
+        # Резервні значення — ті самі адміни, що були в попередній версії бота.
+        ids = {7212962967, 5522897576}
+    return ids
+
+
+ADMIN_IDS = parse_admin_ids()
+# Всі адміністратори отримують сповіщення про нові замовлення й відгуки.
+ORDER_ADMIN_IDS = tuple(ADMIN_IDS)
+
+# Статуси замовлень та порядок їх відображення в адмін-панелі.
+ORDER_STATUSES = ["new", "processing", "shipped", "completed", "cancelled"]
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -46,8 +90,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# LOCALIZATION
+# 2. LOCALIZATION
 # ============================================================
+# Централізована система перекладів. Нові рядки додаються сюди,
+# а не хардкодяться безпосередньо в обробниках.
 
 LANGS = {
     "uk": "🇺🇦 Українська",
@@ -126,6 +172,12 @@ T = {
         "admin_no_categories": "Категорій ще немає.",
         "admin_no_products": "Товарів ще немає.",
         "skip": "пропустити",
+        "order_status_new": "🆕 Нове",
+        "order_status_processing": "⚙️ В обробці",
+        "order_status_shipped": "🚚 Відправлено",
+        "order_status_completed": "✅ Виконано",
+        "order_status_cancelled": "❌ Скасовано",
+        "order_status_changed": "📦 Статус вашого замовлення #{order_id} змінено на: {status}",
     },
     "ru": {
         "welcome": "👋 Добро пожаловать!\n\nВыберите язык:",
@@ -196,6 +248,12 @@ T = {
         "admin_no_categories": "Категорий пока нет.",
         "admin_no_products": "Товаров пока нет.",
         "skip": "пропустить",
+        "order_status_new": "🆕 Новый",
+        "order_status_processing": "⚙️ В обработке",
+        "order_status_shipped": "🚚 Отправлен",
+        "order_status_completed": "✅ Выполнен",
+        "order_status_cancelled": "❌ Отменён",
+        "order_status_changed": "📦 Статус вашего заказа #{order_id} изменён на: {status}",
     },
     "de": {
         "welcome": "👋 Willkommen!\n\nBitte wählen Sie Ihre Sprache:",
@@ -266,6 +324,12 @@ T = {
         "admin_no_categories": "Noch keine Kategorien.",
         "admin_no_products": "Noch keine Produkte.",
         "skip": "überspringen",
+        "order_status_new": "🆕 Neu",
+        "order_status_processing": "⚙️ In Bearbeitung",
+        "order_status_shipped": "🚚 Versandt",
+        "order_status_completed": "✅ Abgeschlossen",
+        "order_status_cancelled": "❌ Storniert",
+        "order_status_changed": "📦 Der Status Ihrer Bestellung #{order_id} wurde geändert zu: {status}",
     },
     "en": {
         "welcome": "👋 Welcome!\n\nPlease choose your language:",
@@ -336,6 +400,12 @@ T = {
         "admin_no_categories": "No categories yet.",
         "admin_no_products": "No products yet.",
         "skip": "skip",
+        "order_status_new": "🆕 New",
+        "order_status_processing": "⚙️ Processing",
+        "order_status_shipped": "🚚 Shipped",
+        "order_status_completed": "✅ Completed",
+        "order_status_cancelled": "❌ Cancelled",
+        "order_status_changed": "📦 Your order #{order_id} status changed to: {status}",
     },
 }
 
@@ -343,6 +413,11 @@ T = {
 def tr(user_id: Optional[int], key: str) -> str:
     lang = get_user_language(user_id)
     return T.get(lang, T["uk"]).get(key, T["uk"].get(key, key))
+
+
+def status_label(lang: str, status: str) -> str:
+    """Повертає локалізовану назву статусу замовлення."""
+    return T.get(lang, T["uk"]).get(f"order_status_{status}", status)
 
 
 def get_user_language(user_id: Optional[int]) -> str:
@@ -385,10 +460,12 @@ def register_user(update: Update) -> None:
 
 
 # ============================================================
-# JSON STORAGE
+# 3. JSON PERSISTENCE (атомарний запис)
 # ============================================================
 
 def read_json(path: Path, default: Any) -> Any:
+    """Безпечне читання JSON. Якщо файл відсутній або пошкоджений —
+    повертає default і не зупиняє роботу бота."""
     try:
         if not path.exists():
             return default
@@ -399,12 +476,18 @@ def read_json(path: Path, default: Any) -> Any:
 
 
 def write_json(path: Path, data: Any) -> bool:
+    """Атомарний запис JSON: спочатку у тимчасовий файл, потім
+    заміна оригіналу (os.replace є атомарною операцією на диску).
+    Це захищає файл від пошкодження при аварійному завершенні процесу."""
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         tmp.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        with open(tmp, "r+", encoding="utf-8") as fh:
+            fh.flush()
+            os.fsync(fh.fileno())
         tmp.replace(path)
         return True
     except OSError:
@@ -417,6 +500,10 @@ def write_json(path: Path, data: Any) -> bool:
 
 
 def load_catalog() -> dict[str, Any]:
+    """Завантажує catalog.json з persistent-директорії. Якщо його там
+    ще немає, але поруч зі скриптом лежить початковий (seed) каталог —
+    копіює його один раз, щоб не втратити наявні дані при першому
+    деплої на Railway з підключеним volume."""
     if (
         not CATALOG_PATH.exists()
         and SEED_CATALOG_PATH.exists()
@@ -431,12 +518,77 @@ def load_catalog() -> dict[str, Any]:
         CATALOG_PATH,
         {"currency": "EUR", "categories": {}},
     )
-    if not isinstance(catalog, dict):
-        catalog = {"currency": "EUR", "categories": {}}
-    if not isinstance(catalog.get("categories"), dict):
-        catalog["categories"] = {}
-    catalog.setdefault("currency", "EUR")
+    catalog = normalize_catalog(catalog)
     return catalog
+
+
+def normalize_catalog(raw: Any) -> dict[str, Any]:
+    """Шар сумісності зі старими структурами catalog.json.
+
+    Підтримує:
+      - новий формат {"categories": {key: {"title","brands":{...}}}}
+      - старий формат, де замість "brands" використовувалося "products"
+      - старий формат, де категорії лежали під ключем "items" на
+        верхньому рівні (без вкладеності brands)
+
+    Мета — ніколи не зламати завантаження існуючого каталогу, а
+    привести його до єдиної внутрішньої структури:
+        {"currency": ..., "categories": {ck: {"title", "photo", "brands": {bk: {"title","photo","items":[...]}}}}}
+    """
+    if not isinstance(raw, dict):
+        return {"currency": "EUR", "categories": {}}
+
+    normalized: dict[str, Any] = {
+        "currency": raw.get("currency", "EUR"),
+        "categories": {},
+    }
+
+    raw_categories = raw.get("categories")
+    if not isinstance(raw_categories, dict):
+        raw_categories = {}
+
+    for ck, category in raw_categories.items():
+        if not isinstance(category, dict):
+            continue
+        norm_cat = {
+            "title": category.get("title", ck),
+            "brands": {},
+        }
+        if category.get("photo"):
+            norm_cat["photo"] = category["photo"]
+
+        # Старі каталоги іноді називали розділ товарів "products"
+        # замість "brands". Підтримуємо обидва варіанти.
+        raw_brands = category.get("brands")
+        if not isinstance(raw_brands, dict):
+            raw_brands = category.get("products")
+        if not isinstance(raw_brands, dict):
+            raw_brands = {}
+
+        for bk, brand in raw_brands.items():
+            if not isinstance(brand, dict):
+                continue
+            items = brand.get("items")
+            if not isinstance(items, list):
+                items = []
+            norm_cat["brands"][bk] = {
+                "title": brand.get("title", bk),
+                "items": items,
+            }
+            if brand.get("photo"):
+                norm_cat["brands"][bk]["photo"] = brand["photo"]
+
+        # Якщо у старій категорії товари лежали напряму в "items"
+        # (без розділів-брендів), створюємо для них один розділ за замовчуванням.
+        if not norm_cat["brands"] and isinstance(category.get("items"), list):
+            norm_cat["brands"]["default"] = {
+                "title": "Товари",
+                "items": category["items"],
+            }
+
+        normalized["categories"][ck] = norm_cat
+
+    return normalized
 
 
 CATALOG = load_catalog()
@@ -447,15 +599,74 @@ def save_catalog() -> bool:
 
 
 def save_order(order: dict[str, Any]) -> bool:
+    """Зберігає нове замовлення. Замовлення НІКОЛИ не втрачається:
+    спочатку відбувається запис у файл, і лише потім (окремо, у
+    викликаючому коді) — спроба сповістити адміністраторів."""
     orders = read_json(ORDERS_PATH, [])
     if not isinstance(orders, list):
         orders = []
     orders.append(order)
-    return write_json(ORDERS_PATH, orders[-2000:])
+    return write_json(ORDERS_PATH, orders)
+
+
+def load_orders() -> list[dict[str, Any]]:
+    orders = read_json(ORDERS_PATH, [])
+    return orders if isinstance(orders, list) else []
+
+
+def update_order(order_id: str, **fields: Any) -> Optional[dict[str, Any]]:
+    """Оновлює поля замовлення за його ID та атомарно зберігає файл.
+    Зміна статусу замовлення НІКОЛИ не відкатується через помилку
+    сповіщення користувача — спочатку зберігаємо, потім сповіщаємо."""
+    orders = load_orders()
+    for order in orders:
+        if order.get("order_id") == order_id:
+            order.update(fields)
+            write_json(ORDERS_PATH, orders)
+            return order
+    return None
+
+
+def find_order(order_id: str) -> Optional[dict[str, Any]]:
+    for order in load_orders():
+        if order.get("order_id") == order_id:
+            return order
+    return None
+
+
+def save_review(review: dict[str, Any]) -> bool:
+    reviews = read_json(REVIEWS_PATH, [])
+    if not isinstance(reviews, list):
+        reviews = []
+    reviews.append(review)
+    return write_json(REVIEWS_PATH, reviews)
+
+
+def load_reviews() -> list[dict[str, Any]]:
+    reviews = read_json(REVIEWS_PATH, [])
+    return reviews if isinstance(reviews, list) else []
+
+
+def update_review(review_id: str, **fields: Any) -> Optional[dict[str, Any]]:
+    reviews = load_reviews()
+    for review in reviews:
+        if review.get("review_id") == review_id:
+            review.update(fields)
+            write_json(REVIEWS_PATH, reviews)
+            return review
+    return None
+
+
+def delete_review(review_id: str) -> bool:
+    reviews = load_reviews()
+    filtered = [r for r in reviews if r.get("review_id") != review_id]
+    if len(filtered) == len(reviews):
+        return False
+    return write_json(REVIEWS_PATH, filtered)
 
 
 # ============================================================
-# CATALOG COMPATIBILITY HELPERS
+# 4. CATALOG COMPATIBILITY HELPERS
 # ============================================================
 
 def categories() -> dict[str, Any]:
@@ -538,8 +749,17 @@ def all_products() -> list[tuple[str, str, int, dict[str, Any]]]:
     return result
 
 
+def category_has_products(category_key: str) -> bool:
+    """Перевіряє, чи має категорія хоч один товар — використовується
+    для безпечного видалення категорій (щоб не втратити товари випадково)."""
+    for brand in brands_get(category_key).values():
+        if isinstance(brand, dict) and items_get(brand):
+            return True
+    return False
+
+
 # ============================================================
-# UI HELPERS
+# 5. UI HELPERS
 # ============================================================
 
 def lang_keyboard() -> InlineKeyboardMarkup:
@@ -561,18 +781,20 @@ def main_keyboard(user_id: Optional[int]) -> InlineKeyboardMarkup:
 
 
 def admin_keyboard() -> InlineKeyboardMarkup:
+    """Головне меню адмін-панелі — структура відповідає ТЗ:
+    Замовлення / Товари / Категорії / Відгуки / Статистика / Розсилка."""
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📁 Категорії", callback_data="adm:categories"),
+            InlineKeyboardButton("📦 Замовлення", callback_data="adm:orders"),
             InlineKeyboardButton("🛠 Товари", callback_data="adm:products"),
         ],
         [
-            InlineKeyboardButton("➕ Додати категорію", callback_data="adm:addcat"),
-            InlineKeyboardButton("➕ Додати товар", callback_data="adm:addproduct"),
+            InlineKeyboardButton("📁 Категорії", callback_data="adm:categories"),
+            InlineKeyboardButton("⭐ Відгуки", callback_data="adm:reviews"),
         ],
         [
-            InlineKeyboardButton("📣 Розсилка", callback_data="adm:broadcast"),
             InlineKeyboardButton("📊 Статистика", callback_data="adm:stats"),
+            InlineKeyboardButton("📣 Розсилка", callback_data="adm:broadcast"),
         ],
     ])
 
@@ -624,7 +846,7 @@ async def show_photo_or_text(
 
 
 # ============================================================
-# START / LANGUAGE
+# 6. START / LANGUAGE
 # ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -661,7 +883,7 @@ async def language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 # ============================================================
-# CUSTOMER CATALOG
+# 7. CUSTOMER CATALOG
 # ============================================================
 
 async def catalog_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -759,7 +981,6 @@ async def brand_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if not isinstance(product, dict):
             continue
 
-        # Backward-compatible support for the original "parent + flavors" format.
         if "nicotine" in product and isinstance(product.get("items"), list):
             label = f"{product.get('nicotine')} — {price_text(product.get('price', ''))}"
             callback = f"variants:{category_key}:{brand_key}:{i}"
@@ -809,11 +1030,12 @@ async def product_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if is_available(product)
         else tr(update.effective_user.id, "unavailable")
     )
-    text = (
-        f"🧾 {product['name']}\n"
-        f"💶 {price_text(product['price'])}\n"
-        f"{status}"
-    )
+    description = product.get("description")
+    text = f"🧾 {product['name']}\n"
+    if description:
+        text += f"{description}\n"
+    text += f"💶 {price_text(product['price'])}\n{status}"
+
     buttons = []
     if is_available(product):
         buttons.append([
@@ -883,7 +1105,7 @@ async def variants_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 # ============================================================
-# CART
+# 8. CART
 # ============================================================
 
 def cart_get(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, Any]]:
@@ -1030,7 +1252,7 @@ async def clear_cart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # ============================================================
-# ORDER FLOW
+# 9. CHECKOUT / ORDERS
 # ============================================================
 
 def valid_time(value: str) -> bool:
@@ -1043,24 +1265,26 @@ def valid_time(value: str) -> bool:
     return bool(single or interval)
 
 
-def order_preview(user: Any, cart: list[dict[str, Any]], data: dict[str, Any]) -> str:
+def order_preview(user: Any, cart: list[dict[str, Any]], data: dict[str, Any], order_id: str) -> str:
+    """Формує повний текст сповіщення для адміністраторів про нове замовлення."""
     items = "\n".join(
         f"• {item['name']} — {price_text(item['price'])}"
         for item in cart
     )
+    username_line = f"🔗 @{user.username}\n" if user.username else ""
     return (
         "📦 НОВЕ ЗАМОВЛЕННЯ\n\n"
+        f"🆔 Замовлення: #{order_id}\n\n"
         f"👤 {user.full_name}\n"
-        f"🔗 @{user.username}\n" if user.username else
-        f"👤 {user.full_name}\n"
-    ) + (
+        f"{username_line}"
         f"🆔 Telegram ID: {user.id}\n\n"
         f"🛍 Товари:\n{items}\n\n"
         f"💰 Разом: {price_text(cart_total(cart))}\n"
         f"📍 Місто/район: {data['city']}\n"
         f"📅 Дата отримання: {data['date']}\n"
         f"🕒 Час: {data['time']}\n"
-        f"💳 Оплата: {data.get('payment', 'не вказано')}"
+        f"💳 Оплата: {data.get('payment', 'не вказано')}\n"
+        f"📌 Статус: {status_label('uk', 'new')}"
     )
 
 
@@ -1178,18 +1402,21 @@ async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "status": "new",
         }
 
+        # КРИТИЧНО: замовлення спершу зберігається у постійне сховище,
+        # і лише потім бот намагається сповістити адміністраторів.
         if not save_order(order):
             logger.error("Cannot save order %s", order_id)
             await show_text(update, tr(user.id, "order_failed"))
             return
 
-        text = order_preview(user, cart, flow)
+        text = order_preview(user, cart, flow, order_id)
         delivered_count = 0
         for admin_id in ORDER_ADMIN_IDS:
             try:
                 await context.bot.send_message(chat_id=admin_id, text=text)
                 delivered_count += 1
             except Exception:
+                # Помилка сповіщення НЕ впливає на вже збережене замовлення.
                 logger.exception("Cannot send order %s to admin %s", order_id, admin_id)
 
         if delivered_count == 0:
@@ -1206,11 +1433,15 @@ async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 # ============================================================
-# ADMIN
+# 10. ADMIN — ДОСТУП
 # ============================================================
 
 def admin_allowed(update: Update) -> bool:
-    return bool(update.effective_user and update.effective_user.id == ADMIN_ID)
+    """Перевіряє ID користувача проти списку ADMIN_IDS.
+    Викликається в КОЖНОМУ адмін-обробнику (а не лише при показі кнопки),
+    щоб неавторизований користувач не міг виконати адмін-дію напряму
+    через підроблений callback_data."""
+    return bool(update.effective_user and update.effective_user.id in ADMIN_IDS)
 
 
 async def deny_admin(update: Update) -> None:
@@ -1230,6 +1461,10 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+# ============================================================
+# 11. ADMIN — ГОЛОВНИЙ РОУТЕР CALLBACK'ІВ
+# ============================================================
+
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await answer_callback(update)
     if not admin_allowed(update):
@@ -1240,90 +1475,77 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     data = query.data if query else ""
     action = data[4:] if data.startswith("adm:") else ""
 
+    # --- Головне меню / категорії --------------------------------------
     if action == "home":
         await show_text(update, "⚙️ Адмін-панель", admin_keyboard())
-        return
-
-    if action == "categories":
+    elif action == "categories":
         await admin_categories(update, context)
     elif action == "addcat":
         context.user_data["admin_flow"] = {"step": "add_category_name"}
         await show_text(update, "📁 Надішліть назву нової категорії.")
-    elif action == "products":
-        await admin_products(update, context)
-    elif action == "addproduct":
-        await admin_add_product_start(update, context)
-    elif action == "broadcast":
-        context.user_data["admin_flow"] = {"step": "broadcast_text"}
-        await show_text(update, T["uk"]["admin_broadcast_text"])
-    elif action.startswith("addprodcat:"):
-        ck = action.split(":", 1)[1]
-        category = category_get(ck)
-        if not category:
-            await show_text(update, "❌ Категорію не знайдено.")
-            return
-        brands = brands_get(ck)
-        if not brands:
-            bk = unique_key("brand", brands)
-            brands[bk] = {"title": "Товари", "items": []}
-            save_catalog()
-        buttons = [
-            [InlineKeyboardButton(
-                str(brand.get("title", bk)),
-                callback_data=f"adm:addprodbk:{ck}:{bk}",
-            )]
-            for bk, brand in brands.items()
-            if isinstance(brand, dict)
-        ]
-        buttons.append([
-            InlineKeyboardButton("⬅️ Назад", callback_data="adm:products")
-        ])
-        await show_text(update, "🏷 Виберіть розділ товарів:", InlineKeyboardMarkup(buttons))
-    elif action.startswith("addprodbk:"):
-        parts = action.split(":")
-        if len(parts) != 3:
-            return
-        ck, bk = parts[1], parts[2]
-        if not brand_get(ck, bk):
-            await show_text(update, "❌ Розділ не знайдено.")
-            return
-        context.user_data["admin_flow"] = {
-            "step": "add_product_name",
-            "category_key": ck,
-            "brand_key": bk,
-        }
-        await show_text(update, "➕ Надішліть назву товару.")
-    elif action == "stats":
-        users = read_json(USERS_PATH, {})
-        orders = read_json(ORDERS_PATH, [])
-        await show_text(
-            update,
-            f"📊 Статистика\n\n"
-            f"👥 Користувачів: {len(users) if isinstance(users, dict) else 0}\n"
-            f"📦 Замовлень: {len(orders) if isinstance(orders, list) else 0}\n"
-            f"🛍 Товарів: {len(all_products())}\n"
-            f"📁 Категорій: {len(categories())}",
-            InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Адмін-панель", callback_data="adm:home")]
-            ]),
-        )
     elif action.startswith("cat:"):
-        await admin_category_actions(update, context, action.split(":")[1])
+        await admin_category_actions(update, context, action.split(":", 1)[1])
     elif action.startswith("renamecat:"):
         key = action.split(":", 1)[1]
         context.user_data["admin_flow"] = {"step": "rename_category", "category_key": key}
         await show_text(update, "✏️ Надішліть нову назву категорії.")
+    elif action.startswith("catdesc:"):
+        key = action.split(":", 1)[1]
+        context.user_data["admin_flow"] = {"step": "category_description", "category_key": key}
+        await show_text(update, "📝 Надішліть новий опис категорії (або «пропустити»).")
     elif action.startswith("catphoto:"):
         key = action.split(":", 1)[1]
         context.user_data["admin_flow"] = {"step": "category_photo", "category_key": key}
         await show_text(update, "🖼 Надішліть нове фото категорії.")
     elif action.startswith("delcat:"):
         key = action.split(":", 1)[1]
+        if category_has_products(key):
+            # Категорія має товари — видалення потребує явного підтвердження,
+            # щоб адміністратор не втратив товари випадково.
+            await show_text(
+                update,
+                "⚠️ У цій категорії є товари. Видалити категорію РАЗОМ із товарами?",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🗑 Так, видалити все", callback_data=f"adm:delcatforce:{key}")],
+                    [InlineKeyboardButton("⬅️ Скасувати", callback_data=f"adm:cat:{key}")],
+                ]),
+            )
+        else:
+            categories().pop(key, None)
+            save_catalog()
+            await show_text(update, "✅ Категорію видалено.", admin_keyboard())
+    elif action.startswith("delcatforce:"):
+        key = action.split(":", 1)[1]
         categories().pop(key, None)
         save_catalog()
-        await show_text(update, "✅ Категорію видалено.", admin_keyboard())
+        await show_text(update, "✅ Категорію та її товари видалено.", admin_keyboard())
+
+    # --- Товари ----------------------------------------------------------
+    elif action == "products":
+        await admin_products(update, context)
+    elif action == "addproduct":
+        await admin_add_product_start(update, context)
+    elif action.startswith("addprodcat:"):
+        await admin_add_product_choose_brand(update, context, action.split(":", 1)[1])
+    elif action.startswith("addprodbk:"):
+        parts = action.split(":")
+        if len(parts) == 3:
+            ck, bk = parts[1], parts[2]
+            if not brand_get(ck, bk):
+                await show_text(update, "❌ Розділ не знайдено.")
+            else:
+                context.user_data["admin_flow"] = {
+                    "step": "add_product_name",
+                    "category_key": ck,
+                    "brand_key": bk,
+                }
+                await show_text(update, "➕ Надішліть назву товару.")
     elif action.startswith("brand:"):
         await admin_brand_products(update, context, action.split(":"))
+    elif action.startswith("branditems:"):
+        parts = action.split(":")
+        if len(parts) == 3:
+            await admin_brand_items(update, context, parts[1], parts[2])
     elif action.startswith("item:"):
         await admin_product_actions(update, context, action.split(":"))
     elif action.startswith("toggle:"):
@@ -1331,30 +1553,47 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif action.startswith("photo:"):
         await admin_product_photo_start(update, context, action.split(":"))
     elif action.startswith("editname:"):
-        parts = action.split(":")
-        if len(parts) == 4:
-            context.user_data["admin_flow"] = {
-                "step": "edit_product_name",
-                "category_key": parts[1],
-                "brand_key": parts[2],
-                "index": int(parts[3]),
-            }
-            await show_text(update, "✏️ Надішліть нову назву товару.")
+        await admin_product_edit_start(update, context, action.split(":"), "edit_product_name", "✏️ Надішліть нову назву товару.")
+    elif action.startswith("editdesc:"):
+        await admin_product_edit_start(update, context, action.split(":"), "edit_product_description", "📝 Надішліть новий опис товару (або «пропустити»).")
     elif action.startswith("editprice:"):
-        parts = action.split(":")
-        if len(parts) == 4:
-            context.user_data["admin_flow"] = {
-                "step": "edit_product_price",
-                "category_key": parts[1],
-                "brand_key": parts[2],
-                "index": int(parts[3]),
-            }
-            await show_text(update, "💶 Надішліть нову ціну, наприклад 19.99")
+        await admin_product_edit_start(update, context, action.split(":"), "edit_product_price", "💶 Надішліть нову ціну, наприклад 19.99")
     elif action.startswith("delete:"):
         await admin_delete_product(update, context, action.split(":"))
+
+    # --- Замовлення --------------------------------------------------------
+    elif action == "orders":
+        await admin_orders_list(update, context)
+    elif action.startswith("order:"):
+        await admin_order_detail(update, context, action.split(":", 1)[1])
+    elif action.startswith("orderstatus:"):
+        parts = action.split(":")
+        if len(parts) == 3:
+            await admin_order_set_status(update, context, order_id=parts[1], new_status=parts[2])
+
+    # --- Відгуки -----------------------------------------------------------
+    elif action == "reviews":
+        await admin_reviews_list(update, context)
+    elif action.startswith("review:"):
+        await admin_review_detail(update, context, action.split(":", 1)[1])
+    elif action.startswith("reviewtoggle:"):
+        await admin_review_toggle(update, context, action.split(":", 1)[1])
+    elif action.startswith("reviewdelete:"):
+        await admin_review_delete(update, context, action.split(":", 1)[1])
+
+    # --- Статистика / розсилка ---------------------------------------------
+    elif action == "stats":
+        await admin_stats(update, context)
+    elif action == "broadcast":
+        context.user_data["admin_flow"] = {"step": "broadcast_text"}
+        await show_text(update, T["uk"]["admin_broadcast_text"])
     elif action.startswith("broadcast:"):
         await admin_broadcast_action(update, context, action.split(":", 1)[1])
 
+
+# ============================================================
+# 12. ADMIN — КАТЕГОРІЇ
+# ============================================================
 
 async def admin_categories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     buttons = []
@@ -1366,40 +1605,36 @@ async def admin_categories(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     callback_data=f"adm:cat:{key}",
                 )
             ])
-    buttons.append([
-        InlineKeyboardButton("➕ Додати категорію", callback_data="adm:addcat")
-    ])
-    buttons.append([
-        InlineKeyboardButton("⬅️ Адмін-панель", callback_data="adm:home")
-    ])
-    await show_text(
-        update,
-        "📁 Категорії\n\nОберіть категорію для редагування:",
-        InlineKeyboardMarkup(buttons),
-    )
+    if not buttons:
+        buttons.append([InlineKeyboardButton("Категорій ще немає", callback_data="adm:categories")])
+    buttons.append([InlineKeyboardButton("➕ Додати категорію", callback_data="adm:addcat")])
+    buttons.append([InlineKeyboardButton("⬅️ Адмін-панель", callback_data="adm:home")])
+    await show_text(update, "📁 Категорії\n\nОберіть категорію для редагування:", InlineKeyboardMarkup(buttons))
 
 
-async def admin_category_actions(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    key: str,
-) -> None:
+async def admin_category_actions(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str) -> None:
     category = category_get(key)
     if not category:
-        await show_text(update, "❌ Категорію не знайдено.")
+        await show_text(update, "❌ Категорію не знайдено.", admin_keyboard())
         return
 
+    description = category.get("description", "—")
     await show_text(
         update,
-        f"📁 {category.get('title', key)}",
+        f"📁 {category.get('title', key)}\n📝 {description}",
         InlineKeyboardMarkup([
             [InlineKeyboardButton("✏️ Змінити назву", callback_data=f"adm:renamecat:{key}")],
+            [InlineKeyboardButton("📝 Змінити опис", callback_data=f"adm:catdesc:{key}")],
             [InlineKeyboardButton("🖼 Змінити фото", callback_data=f"adm:catphoto:{key}")],
             [InlineKeyboardButton("🗑 Видалити", callback_data=f"adm:delcat:{key}")],
             [InlineKeyboardButton("⬅️ Категорії", callback_data="adm:categories")],
         ]),
     )
 
+
+# ============================================================
+# 13. ADMIN — ТОВАРИ
+# ============================================================
 
 async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     buttons = []
@@ -1411,72 +1646,63 @@ async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     callback_data=f"adm:brand:{ck}",
                 )
             ])
-    buttons.append([
-        InlineKeyboardButton("➕ Додати товар", callback_data="adm:addproduct")
-    ])
-    buttons.append([
-        InlineKeyboardButton("⬅️ Адмін-панель", callback_data="adm:home")
-    ])
-    await show_text(
-        update,
-        "🛠 Товари\n\nОберіть категорію:",
-        InlineKeyboardMarkup(buttons),
-    )
+    buttons.append([InlineKeyboardButton("➕ Додати товар", callback_data="adm:addproduct")])
+    buttons.append([InlineKeyboardButton("⬅️ Адмін-панель", callback_data="adm:home")])
+    await show_text(update, "🛠 Товари\n\nОберіть категорію:", InlineKeyboardMarkup(buttons))
 
 
-async def admin_brand_products(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    parts: list[str],
-) -> None:
+async def admin_brand_products(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: list[str]) -> None:
     if len(parts) < 2:
         return
     ck = parts[1]
-    buttons = []
     category = category_get(ck)
     if not category:
         await show_text(update, "❌ Категорію не знайдено.")
         return
 
-    # Existing catalog uses brands. Admin can manage products under each brand.
+    buttons = []
     for bk, brand in brands_get(ck).items():
-        if not isinstance(brand, dict):
-            continue
-        buttons.append([
-            InlineKeyboardButton(
-                f"🏷 {brand.get('title', bk)}",
-                callback_data=f"adm:branditems:{ck}:{bk}",
-            )
-        ])
+        if isinstance(brand, dict):
+            buttons.append([
+                InlineKeyboardButton(
+                    f"🏷 {brand.get('title', bk)}",
+                    callback_data=f"adm:branditems:{ck}:{bk}",
+                )
+            ])
 
-    # Direct fallback: if the category has no brands, create one automatically.
     if not buttons:
         bk = unique_key("brand", brands_get(ck))
         brands_get(ck)[bk] = {"title": "Товари", "items": []}
         save_catalog()
-        buttons.append([
-            InlineKeyboardButton(
-                "🏷 Товари",
-                callback_data=f"adm:branditems:{ck}:{bk}",
-            )
-        ])
+        buttons.append([InlineKeyboardButton("🏷 Товари", callback_data=f"adm:branditems:{ck}:{bk}")])
 
-    buttons.append([
-        InlineKeyboardButton("⬅️ Товари", callback_data="adm:products")
-    ])
+    buttons.append([InlineKeyboardButton("⬅️ Товари", callback_data="adm:products")])
     await show_text(update, f"📁 {category.get('title', ck)}", InlineKeyboardMarkup(buttons))
 
 
-async def admin_product_actions(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    parts: list[str],
-) -> None:
-    # item:category:brand:index
+async def admin_brand_items(update: Update, context: ContextTypes.DEFAULT_TYPE, ck: str, bk: str) -> None:
+    brand = brand_get(ck, bk)
+    if not brand:
+        await show_text(update, "❌ Розділ не знайдено.")
+        return
+
+    buttons = []
+    for i, product in enumerate(items_get(brand)):
+        if isinstance(product, dict) and "name" in product and "price" in product:
+            icon = "✅" if is_available(product) else "❌"
+            buttons.append([
+                InlineKeyboardButton(f"{icon} {product['name']}", callback_data=f"adm:item:{ck}:{bk}:{i}")
+            ])
+
+    if not buttons:
+        buttons.append([InlineKeyboardButton("➕ Додати товар", callback_data="adm:addproduct")])
+
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"adm:brand:{ck}")])
+    await show_text(update, f"🏷 {brand.get('title', bk)}", InlineKeyboardMarkup(buttons))
+
+
+async def admin_product_actions(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: list[str]) -> None:
     if len(parts) != 4:
-        # branditems:category:brand is also handled here by design.
-        if len(parts) == 3 and parts[0] == "branditems":
-            await admin_brand_items(update, context, parts[1], parts[2])
         return
 
     _, ck, bk, index_text = parts
@@ -1491,12 +1717,13 @@ async def admin_product_actions(
         return
 
     status = "✅ В наявності" if is_available(product) else "❌ Немає в наявності"
+    description = product.get("description", "—")
     await show_text(
         update,
-        f"🧾 {product.get('name', 'Товар')}\n"
-        f"💶 {price_text(product.get('price'))}\n{status}",
+        f"🧾 {product.get('name', 'Товар')}\n📝 {description}\n💶 {price_text(product.get('price'))}\n{status}",
         InlineKeyboardMarkup([
             [InlineKeyboardButton("✏️ Змінити назву", callback_data=f"adm:editname:{ck}:{bk}:{index}")],
+            [InlineKeyboardButton("📝 Змінити опис", callback_data=f"adm:editdesc:{ck}:{bk}:{index}")],
             [InlineKeyboardButton("💶 Змінити ціну", callback_data=f"adm:editprice:{ck}:{bk}:{index}")],
             [InlineKeyboardButton("🔄 Змінити наявність", callback_data=f"adm:toggle:{ck}:{bk}:{index}")],
             [InlineKeyboardButton("🖼 Змінити фото", callback_data=f"adm:photo:{ck}:{bk}:{index}")],
@@ -1506,54 +1733,12 @@ async def admin_product_actions(
     )
 
 
-async def admin_brand_items(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    ck: str,
-    bk: str,
-) -> None:
-    brand = brand_get(ck, bk)
-    if not brand:
-        await show_text(update, "❌ Розділ не знайдено.")
-        return
-
-    buttons = []
-    for i, product in enumerate(items_get(brand)):
-        if isinstance(product, dict) and "name" in product and "price" in product:
-            icon = "✅" if is_available(product) else "❌"
-            buttons.append([
-                InlineKeyboardButton(
-                    f"{icon} {product['name']}",
-                    callback_data=f"adm:item:{ck}:{bk}:{i}",
-                )
-            ])
-
-    if not buttons:
-        buttons.append([
-            InlineKeyboardButton("➕ Додати товар", callback_data="adm:addproduct")
-        ])
-
-    buttons.append([
-        InlineKeyboardButton("⬅️ Назад", callback_data=f"adm:brand:{ck}")
-    ])
-    await show_text(
-        update,
-        f"🏷 {brand.get('title', bk)}",
-        InlineKeyboardMarkup(buttons),
-    )
-
-
-async def admin_add_product_start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
+async def admin_add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not categories():
         await show_text(
             update,
             "❌ Спочатку створіть категорію.",
-            InlineKeyboardMarkup([
-                [InlineKeyboardButton("➕ Додати категорію", callback_data="adm:addcat")]
-            ]),
+            InlineKeyboardMarkup([[InlineKeyboardButton("➕ Додати категорію", callback_data="adm:addcat")]]),
         )
         return
 
@@ -1561,15 +1746,371 @@ async def admin_add_product_start(
     for ck, category in categories().items():
         if isinstance(category, dict):
             buttons.append([
-                InlineKeyboardButton(
-                    str(category.get("title", ck)),
-                    callback_data=f"adm:addprodcat:{ck}",
-                )
+                InlineKeyboardButton(str(category.get("title", ck)), callback_data=f"adm:addprodcat:{ck}")
             ])
-    buttons.append([
-        InlineKeyboardButton("⬅️ Адмін-панель", callback_data="adm:home")
-    ])
+    buttons.append([InlineKeyboardButton("⬅️ Адмін-панель", callback_data="adm:home")])
     await show_text(update, "➕ Виберіть категорію:", InlineKeyboardMarkup(buttons))
+
+
+async def admin_add_product_choose_brand(update: Update, context: ContextTypes.DEFAULT_TYPE, ck: str) -> None:
+    category = category_get(ck)
+    if not category:
+        await show_text(update, "❌ Категорію не знайдено.")
+        return
+
+    brands = brands_get(ck)
+    if not brands:
+        bk = unique_key("brand", brands)
+        brands[bk] = {"title": "Товари", "items": []}
+        save_catalog()
+
+    buttons = [
+        [InlineKeyboardButton(str(brand.get("title", bk)), callback_data=f"adm:addprodbk:{ck}:{bk}")]
+        for bk, brand in brands.items()
+        if isinstance(brand, dict)
+    ]
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="adm:products")])
+    await show_text(update, "🏷 Виберіть розділ товарів:", InlineKeyboardMarkup(buttons))
+
+
+async def admin_product_edit_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    parts: list[str],
+    step: str,
+    prompt: str,
+) -> None:
+    if len(parts) != 4:
+        return
+    context.user_data["admin_flow"] = {
+        "step": step,
+        "category_key": parts[1],
+        "brand_key": parts[2],
+        "index": int(parts[3]),
+    }
+    await show_text(update, prompt)
+
+
+async def admin_toggle_product(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: list[str]) -> None:
+    if len(parts) != 4:
+        return
+    _, ck, bk, index_text = parts
+    try:
+        index = int(index_text)
+    except ValueError:
+        return
+    product = find_product(ck, bk, index)
+    if not product:
+        return
+    set_available(product, not is_available(product))
+    save_catalog()
+    await admin_product_actions(update, context, ["item", ck, bk, str(index)])
+
+
+async def admin_product_photo_start(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: list[str]) -> None:
+    if len(parts) != 4:
+        return
+    _, ck, bk, index_text = parts
+    try:
+        index = int(index_text)
+    except ValueError:
+        return
+    if not find_product(ck, bk, index):
+        await show_text(update, "❌ Товар не знайдено.")
+        return
+    context.user_data["admin_flow"] = {
+        "step": "product_photo",
+        "category_key": ck,
+        "brand_key": bk,
+        "index": index,
+    }
+    await show_text(update, "🖼 Надішліть нове фото товару.")
+
+
+async def admin_delete_product(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: list[str]) -> None:
+    if len(parts) != 4:
+        return
+    _, ck, bk, index_text = parts
+    try:
+        index = int(index_text)
+    except ValueError:
+        return
+    brand = brand_get(ck, bk)
+    if not brand:
+        return
+    items = items_get(brand)
+    if 0 <= index < len(items):
+        items.pop(index)
+        save_catalog()
+    await admin_brand_items(update, context, ck, bk)
+
+
+# ============================================================
+# 14. ADMIN — ЗАМОВЛЕННЯ
+# ============================================================
+
+ORDERS_PAGE_SIZE = 15
+
+
+async def admin_orders_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показує останні замовлення (найновіші зверху)."""
+    orders = list(reversed(load_orders()))[:ORDERS_PAGE_SIZE]
+    if not orders:
+        await show_text(
+            update,
+            "📦 Замовлень ще немає.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Адмін-панель", callback_data="adm:home")]]),
+        )
+        return
+
+    buttons = []
+    for order in orders:
+        icon = {
+            "new": "🆕", "processing": "⚙️", "shipped": "🚚",
+            "completed": "✅", "cancelled": "❌",
+        }.get(order.get("status", "new"), "🆕")
+        label = f"{icon} #{order.get('order_id')} — {price_text(order.get('total', 0))}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"adm:order:{order.get('order_id')}")])
+
+    buttons.append([InlineKeyboardButton("⬅️ Адмін-панель", callback_data="adm:home")])
+    await show_text(update, f"📦 Останні замовлення ({len(orders)}):", InlineKeyboardMarkup(buttons))
+
+
+async def admin_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str) -> None:
+    order = find_order(order_id)
+    if not order:
+        await show_text(update, "❌ Замовлення не знайдено.", admin_keyboard())
+        return
+
+    items_text = "\n".join(
+        f"• {item.get('name')} — {price_text(item.get('price'))}"
+        for item in order.get("items", [])
+    )
+    delivery = order.get("delivery", {})
+    username_line = f"🔗 @{order['username']}\n" if order.get("username") else ""
+    text = (
+        f"📦 Замовлення #{order_id}\n\n"
+        f"👤 {order.get('full_name', '—')}\n"
+        f"{username_line}"
+        f"🆔 Telegram ID: {order.get('user_id')}\n\n"
+        f"🛍 Товари:\n{items_text}\n\n"
+        f"💰 Разом: {price_text(order.get('total', 0))}\n"
+        f"📍 {delivery.get('city_or_district', '—')}\n"
+        f"📅 {delivery.get('date', '—')} {delivery.get('time', '—')}\n"
+        f"💳 {order.get('payment', '—')}\n"
+        f"🕒 Створено: {order.get('created_at', '—')}\n"
+        f"📌 Статус: {status_label('uk', order.get('status', 'new'))}"
+    )
+
+    status_buttons = []
+    for status in ORDER_STATUSES:
+        if status != order.get("status"):
+            status_buttons.append(
+                InlineKeyboardButton(
+                    status_label("uk", status),
+                    callback_data=f"adm:orderstatus:{order_id}:{status}",
+                )
+            )
+    # По два статуси в ряд для компактності.
+    rows = [status_buttons[i:i + 2] for i in range(0, len(status_buttons), 2)]
+    rows.append([InlineKeyboardButton("⬅️ Замовлення", callback_data="adm:orders")])
+    await show_text(update, text, InlineKeyboardMarkup(rows))
+
+
+async def admin_order_set_status(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    order_id: str,
+    new_status: str,
+) -> None:
+    """Змінює статус замовлення. Збереження статусу НЕ залежить від
+    результату сповіщення користувача: спочатку зберігаємо, потім
+    намагаємось сповістити (best-effort, з ловом усіх помилок)."""
+    if new_status not in ORDER_STATUSES:
+        return
+
+    order = update_order(order_id, status=new_status)
+    if not order:
+        await show_text(update, "❌ Замовлення не знайдено.", admin_keyboard())
+        return
+
+    user_id = order.get("user_id")
+    lang = order.get("language", "uk")
+    if user_id:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=T.get(lang, T["uk"])["order_status_changed"].format(
+                    order_id=order_id,
+                    status=status_label(lang, new_status),
+                ),
+            )
+        except Forbidden:
+            logger.info("User %s blocked the bot; status notification skipped", user_id)
+        except Exception:
+            logger.exception("Cannot notify user %s about order %s status change", user_id, order_id)
+
+    await admin_order_detail(update, context, order_id)
+
+
+# ============================================================
+# 15. ADMIN — ВІДГУКИ
+# ============================================================
+
+async def admin_reviews_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    reviews = list(reversed(load_reviews()))[:ORDERS_PAGE_SIZE]
+    if not reviews:
+        await show_text(
+            update,
+            "⭐ Відгуків ще немає.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Адмін-панель", callback_data="adm:home")]]),
+        )
+        return
+
+    buttons = []
+    for review in reviews:
+        icon = "👁" if review.get("visible", True) else "🙈"
+        preview = str(review.get("text", ""))[:30]
+        buttons.append([
+            InlineKeyboardButton(f"{icon} {preview}", callback_data=f"adm:review:{review.get('review_id')}")
+        ])
+    buttons.append([InlineKeyboardButton("⬅️ Адмін-панель", callback_data="adm:home")])
+    await show_text(update, f"⭐ Останні відгуки ({len(reviews)}):", InlineKeyboardMarkup(buttons))
+
+
+async def admin_review_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, review_id: str) -> None:
+    reviews = load_reviews()
+    review = next((r for r in reviews if r.get("review_id") == review_id), None)
+    if not review:
+        await show_text(update, "❌ Відгук не знайдено.", admin_keyboard())
+        return
+
+    visible = review.get("visible", True)
+    username_line = f"🔗 @{review['username']}\n" if review.get("username") else ""
+    text = (
+        f"⭐ Відгук\n\n"
+        f"👤 {review.get('full_name', '—')}\n"
+        f"{username_line}"
+        f"🆔 Telegram ID: {review.get('user_id')}\n"
+        f"🕒 {review.get('created_at', '—')}\n"
+        f"👁 Видимість: {'показано' if visible else 'приховано'}\n\n"
+        f"💬 {review.get('text', '')}"
+    )
+    toggle_label = "🙈 Приховати" if visible else "👁 Показати"
+    await show_text(
+        update,
+        text,
+        InlineKeyboardMarkup([
+            [InlineKeyboardButton(toggle_label, callback_data=f"adm:reviewtoggle:{review_id}")],
+            [InlineKeyboardButton("🗑 Видалити", callback_data=f"adm:reviewdelete:{review_id}")],
+            [InlineKeyboardButton("⬅️ Відгуки", callback_data="adm:reviews")],
+        ]),
+    )
+
+
+async def admin_review_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE, review_id: str) -> None:
+    reviews = load_reviews()
+    review = next((r for r in reviews if r.get("review_id") == review_id), None)
+    if review:
+        update_review(review_id, visible=not review.get("visible", True))
+    await admin_review_detail(update, context, review_id)
+
+
+async def admin_review_delete(update: Update, context: ContextTypes.DEFAULT_TYPE, review_id: str) -> None:
+    delete_review(review_id)
+    await admin_reviews_list(update, context)
+
+
+# ============================================================
+# 16. ADMIN — СТАТИСТИКА
+# ============================================================
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Рахує статистику. КРИТИЧНО: дохід і популярні товари рахуються
+    ЛИШЕ по замовленнях зі статусом "completed"."""
+    orders = load_orders()
+    users = read_json(USERS_PATH, {})
+
+    total_orders = len(orders)
+    completed = [o for o in orders if o.get("status") == "completed"]
+    cancelled = [o for o in orders if o.get("status") == "cancelled"]
+
+    revenue = round(sum(float(o.get("total", 0) or 0) for o in completed), 2)
+
+    popularity: dict[str, int] = {}
+    for order in completed:
+        for item in order.get("items", []):
+            name = str(item.get("name", "—"))
+            popularity[name] = popularity.get(name, 0) + 1
+    top_products = sorted(popularity.items(), key=lambda kv: kv[1], reverse=True)[:5]
+
+    top_text = "\n".join(
+        f"{i}. {name} — {count} прод."
+        for i, (name, count) in enumerate(top_products, 1)
+    ) or "—"
+
+    text = (
+        "📊 Статистика\n\n"
+        f"👥 Користувачів: {len(users) if isinstance(users, dict) else 0}\n"
+        f"📁 Категорій: {len(categories())}\n"
+        f"🛍 Товарів: {len(all_products())}\n\n"
+        f"📦 Всього замовлень: {total_orders}\n"
+        f"✅ Виконано: {len(completed)}\n"
+        f"❌ Скасовано: {len(cancelled)}\n\n"
+        f"💰 Дохід (лише виконані): {price_text(revenue)}\n\n"
+        f"🏆 Популярні товари:\n{top_text}"
+    )
+    await show_text(
+        update,
+        text,
+        InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Адмін-панель", callback_data="adm:home")]]),
+    )
+
+
+# ============================================================
+# 17. ADMIN — РОЗСИЛКА
+# ============================================================
+
+async def admin_broadcast_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str) -> None:
+    flow = context.user_data.get("admin_flow")
+    if action == "cancel":
+        context.user_data.pop("admin_flow", None)
+        await show_text(update, "❌ Розсилку скасовано.", admin_keyboard())
+        return
+
+    if action != "send" or not isinstance(flow, dict) or not flow.get("text"):
+        return
+
+    users = read_json(USERS_PATH, {})
+    if not isinstance(users, dict):
+        users = {}
+
+    sent = 0
+    blocked = 0
+    for user_id_text in list(users.keys()):
+        try:
+            await context.bot.send_message(chat_id=int(user_id_text), text=flow["text"])
+            sent += 1
+        except Forbidden:
+            # Користувач заблокував бота — пропускаємо, не зупиняючи розсилку.
+            blocked += 1
+        except Exception:
+            blocked += 1
+            logger.exception("Broadcast failed for %s", user_id_text)
+
+    context.user_data.pop("admin_flow", None)
+    await show_text(
+        update,
+        f"📣 Розсилку завершено.\n\n✅ Надіслано: {sent}\n⚠️ Не доставлено: {blocked}",
+        admin_keyboard(),
+    )
+
+
+# ============================================================
+# 18. ADMIN — ТЕКСТОВИЙ РОУТЕР (покроковий ввід)
+# ============================================================
+
+SKIP_WORDS = {"пропустити", "пропустить", "skip", "überspringen", "-"}
 
 
 async def admin_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1600,18 +2141,25 @@ async def admin_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.user_data.pop("admin_flow", None)
         await update.message.reply_text("✅ Назву категорії змінено.", reply_markup=admin_keyboard())
 
+    elif step == "category_description":
+        category = category_get(flow.get("category_key", ""))
+        if not category:
+            await update.message.reply_text("❌ Категорію не знайдено.")
+            return
+        if text.lower() not in SKIP_WORDS:
+            category["description"] = text
+            save_catalog()
+        context.user_data.pop("admin_flow", None)
+        await update.message.reply_text("✅ Опис категорії оновлено.", reply_markup=admin_keyboard())
+
     elif step == "category_photo":
-        if text.lower() in {"пропустити", "skip", "überspringen", "-"}:
+        if text.lower() in SKIP_WORDS:
             context.user_data.pop("admin_flow", None)
             await update.message.reply_text("Скасовано.", reply_markup=admin_keyboard())
             return
 
     elif step == "edit_product_name":
-        product = find_product(
-            flow.get("category_key", ""),
-            flow.get("brand_key", ""),
-            int(flow.get("index", -1)),
-        )
+        product = find_product(flow.get("category_key", ""), flow.get("brand_key", ""), int(flow.get("index", -1)))
         if not product:
             context.user_data.pop("admin_flow", None)
             await update.message.reply_text("❌ Товар не знайдено.")
@@ -1621,6 +2169,18 @@ async def admin_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.user_data.pop("admin_flow", None)
         await update.message.reply_text("✅ Назву товару змінено.", reply_markup=admin_keyboard())
 
+    elif step == "edit_product_description":
+        product = find_product(flow.get("category_key", ""), flow.get("brand_key", ""), int(flow.get("index", -1)))
+        if not product:
+            context.user_data.pop("admin_flow", None)
+            await update.message.reply_text("❌ Товар не знайдено.")
+            return
+        if text.lower() not in SKIP_WORDS:
+            product["description"] = text
+            save_catalog()
+        context.user_data.pop("admin_flow", None)
+        await update.message.reply_text("✅ Опис товару оновлено.", reply_markup=admin_keyboard())
+
     elif step == "edit_product_price":
         try:
             price = float(text.replace(",", "."))
@@ -1629,11 +2189,7 @@ async def admin_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         except ValueError:
             await update.message.reply_text("❌ Некоректна ціна. Наприклад: 19.99")
             return
-        product = find_product(
-            flow.get("category_key", ""),
-            flow.get("brand_key", ""),
-            int(flow.get("index", -1)),
-        )
+        product = find_product(flow.get("category_key", ""), flow.get("brand_key", ""), int(flow.get("index", -1)))
         if not product:
             context.user_data.pop("admin_flow", None)
             await update.message.reply_text("❌ Товар не знайдено.")
@@ -1645,6 +2201,12 @@ async def admin_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     elif step == "add_product_name":
         flow["name"] = text
+        flow["step"] = "add_product_description"
+        await update.message.reply_text("📝 Надішліть опис товару (або «пропустити»).")
+
+    elif step == "add_product_description":
+        if text.lower() not in SKIP_WORDS:
+            flow["description"] = text
         flow["step"] = "add_product_price"
         await update.message.reply_text("💶 Надішліть ціну, наприклад 19.99")
 
@@ -1661,7 +2223,7 @@ async def admin_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text("🖼 Надішліть фото товару або напишіть «пропустити».")
 
     elif step == "add_product_photo":
-        if text.lower() not in {"пропустити", "skip", "überspringen", "-"}:
+        if text.lower() not in SKIP_WORDS:
             await update.message.reply_text("🖼 Надішліть фото або напишіть «пропустити».")
             return
         flow["step"] = "add_product_stock"
@@ -1688,6 +2250,8 @@ async def admin_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "price": flow["price"],
             "in_stock": value in yes,
         }
+        if flow.get("description"):
+            product["description"] = flow["description"]
         if flow.get("photo"):
             product["photo"] = flow["photo"]
 
@@ -1700,8 +2264,7 @@ async def admin_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         flow["text"] = text
         flow["step"] = "broadcast_confirm"
         await update.message.reply_text(
-            f"📣 ПРЕВ'Ю\n\n{text}\n\n"
-            "Надіслати всім користувачам?",
+            f"📣 ПРЕВ'Ю\n\n{text}\n\nНадіслати всім користувачам?",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ Надіслати", callback_data="adm:broadcast:send")],
                 [InlineKeyboardButton("❌ Скасувати", callback_data="adm:broadcast:cancel")],
@@ -1723,9 +2286,7 @@ async def admin_photo_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if step == "add_product_photo":
         flow["photo"] = photo_id
         flow["step"] = "add_product_stock"
-        await update.message.reply_text(
-            "Товар є в наявності? Напишіть: так/ні, да/нет, yes/no або ja/nein."
-        )
+        await update.message.reply_text("Товар є в наявності? Напишіть: так/ні, да/нет, yes/no або ja/nein.")
 
     elif step == "category_photo":
         category = category_get(flow.get("category_key", ""))
@@ -1751,169 +2312,8 @@ async def admin_photo_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data.pop("admin_flow", None)
 
 
-async def admin_broadcast_action(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    action: str,
-) -> None:
-    flow = context.user_data.get("admin_flow")
-    if action == "cancel":
-        context.user_data.pop("admin_flow", None)
-        await show_text(update, "❌ Розсилку скасовано.", admin_keyboard())
-        return
-
-    if action != "send" or not isinstance(flow, dict) or not flow.get("text"):
-        return
-
-    users = read_json(USERS_PATH, {})
-    if not isinstance(users, dict):
-        users = {}
-
-    sent = 0
-    blocked = 0
-    for user_id_text in list(users.keys()):
-        try:
-            await context.bot.send_message(
-                chat_id=int(user_id_text),
-                text=flow["text"],
-            )
-            sent += 1
-        except Forbidden:
-            blocked += 1
-        except Exception:
-            blocked += 1
-            logger.exception("Broadcast failed for %s", user_id_text)
-
-    context.user_data.pop("admin_flow", None)
-    await show_text(
-        update,
-        f"📣 Розсилку завершено.\n\n"
-        f"✅ Надіслано: {sent}\n"
-        f"⚠️ Не доставлено: {blocked}",
-        admin_keyboard(),
-    )
-
-
-async def admin_toggle_product(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    parts: list[str],
-) -> None:
-    if len(parts) != 4:
-        return
-    _, ck, bk, index_text = parts
-    try:
-        index = int(index_text)
-    except ValueError:
-        return
-    product = find_product(ck, bk, index)
-    if not product:
-        return
-    set_available(product, not is_available(product))
-    save_catalog()
-    await admin_product_actions(update, context, ["item", ck, bk, str(index)])
-
-
-async def admin_product_photo_start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    parts: list[str],
-) -> None:
-    if len(parts) != 4:
-        return
-    _, ck, bk, index_text = parts
-    try:
-        index = int(index_text)
-    except ValueError:
-        return
-    if not find_product(ck, bk, index):
-        await show_text(update, "❌ Товар не знайдено.")
-        return
-    context.user_data["admin_flow"] = {
-        "step": "product_photo",
-        "category_key": ck,
-        "brand_key": bk,
-        "index": index,
-    }
-    await show_text(update, "🖼 Надішліть нове фото товару.")
-
-
-async def admin_delete_product(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    parts: list[str],
-) -> None:
-    if len(parts) != 4:
-        return
-    _, ck, bk, index_text = parts
-    try:
-        index = int(index_text)
-    except ValueError:
-        return
-    brand = brand_get(ck, bk)
-    if not brand:
-        return
-    items = items_get(brand)
-    if 0 <= index < len(items):
-        items.pop(index)
-        save_catalog()
-    await admin_brand_items(update, context, ck, bk)
-
-
 # ============================================================
-# ADMIN ADD-PRODUCT CALLBACK ROUTING
-# ============================================================
-
-async def admin_extra_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await answer_callback(update)
-    if not admin_allowed(update):
-        await deny_admin(update)
-        return
-
-    query = update.callback_query
-    data = query.data if query else ""
-
-    if data.startswith("adm:addprodcat:"):
-        ck = data.split(":", 2)[2]
-        category = category_get(ck)
-        if not category:
-            await show_text(update, "❌ Категорію не знайдено.")
-            return
-
-        brands = brands_get(ck)
-        if not brands:
-            bk = unique_key("brand", brands)
-            brands[bk] = {"title": "Товари", "items": []}
-            save_catalog()
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    str(brand.get("title", bk)),
-                    callback_data=f"adm:addprodbk:{ck}:{bk}",
-                )
-            ]
-            for bk, brand in brands.items()
-            if isinstance(brand, dict)
-        ]
-        await show_text(update, "🏷 Виберіть розділ товарів:", InlineKeyboardMarkup(buttons))
-
-    elif data.startswith("adm:addprodbk:"):
-        parts = data.split(":")
-        if len(parts) != 4:
-            return
-        ck, bk = parts[2], parts[3]
-        if not brand_get(ck, bk):
-            return
-        context.user_data["admin_flow"] = {
-            "step": "add_product_name",
-            "category_key": ck,
-            "brand_key": bk,
-        }
-        await show_text(update, "➕ Надішліть назву товару.")
-
-
-# ============================================================
-# GENERIC TEXT ROUTER FOR ORDER FLOW
+# 19. КЛІЄНТСЬКИЙ ТЕКСТОВИЙ РОУТЕР (кошик/оформлення/відгуки)
 # ============================================================
 
 async def customer_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1922,33 +2322,50 @@ async def customer_text_router(update: Update, context: ContextTypes.DEFAULT_TYP
 
     register_user(update)
 
-    # Admin text flows have priority.
+    # Адмін-флоу мають пріоритет над клієнтськими.
     if admin_allowed(update) and context.user_data.get("admin_flow"):
         await admin_text_router(update, context)
         return
 
     if context.user_data.get("feedback_flow"):
         user = update.effective_user
-        feedback = update.message.text.strip()
-        if not feedback:
+        feedback_text = update.message.text.strip()
+        if not feedback_text:
             return
+
+        now = datetime.now()
+        review_id = f"{user.id}-{int(now.timestamp())}"
+        review = {
+            "review_id": review_id,
+            "user_id": user.id,
+            "username": user.username,
+            "full_name": user.full_name,
+            "text": feedback_text,
+            "created_at": now.isoformat(timespec="seconds"),
+            "visible": True,
+        }
+        # Відгук спершу зберігається у reviews.json, і лише потім
+        # відправляється сповіщення адміністраторам.
+        save_review(review)
+
         delivered = 0
-        feedback_text = (
+        username_line = f"🔗 @{user.username}\n" if user.username else ""
+        notify_text = (
             "⭐ НОВИЙ ВІДГУК\n\n"
             f"👤 {user.full_name}\n"
-            f"🔗 @{user.username}\n" if user.username else f"👤 {user.full_name}\n"
-        ) + f"🆔 Telegram ID: {user.id}\n\n💬 {feedback}"
+            f"{username_line}"
+            f"🆔 Telegram ID: {user.id}\n\n"
+            f"💬 {feedback_text}"
+        )
         for admin_id in ORDER_ADMIN_IDS:
             try:
-                await context.bot.send_message(chat_id=admin_id, text=feedback_text)
+                await context.bot.send_message(chat_id=admin_id, text=notify_text)
                 delivered += 1
             except Exception:
                 logger.exception("Cannot send feedback to %s", admin_id)
+
         context.user_data.pop("feedback_flow", None)
-        if delivered:
-            await update.message.reply_text(tr(user.id, "feedback_sent"), reply_markup=main_keyboard(user.id))
-        else:
-            await update.message.reply_text(tr(user.id, "order_failed"), reply_markup=main_keyboard(user.id))
+        await update.message.reply_text(tr(user.id, "feedback_sent"), reply_markup=main_keyboard(user.id))
         return
 
     flow = context.user_data.get("order_flow")
@@ -1993,46 +2410,39 @@ async def customer_text_router(update: Update, context: ContextTypes.DEFAULT_TYP
                 [InlineKeyboardButton(tr(user_id, "cancel"), callback_data="order:cancel")],
             ]),
         )
-        return
-
-
 
 
 # ============================================================
-# MAIN MENU / FALLBACK
+# 20. ГОЛОВНЕ МЕНЮ / FALLBACK / ПОМИЛКИ
 # ============================================================
 
 async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await answer_callback(update)
     register_user(update)
-    await show_text(
-        update,
-        tr(update.effective_user.id, "menu"),
-        main_keyboard(update.effective_user.id),
-    )
+    await show_text(update, tr(update.effective_user.id, "menu"), main_keyboard(update.effective_user.id))
 
 
 async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ловить будь-які callback_data без відповідного обробника, щоб
+    користувач ніколи не бачив "мертву" кнопку без реакції."""
     await answer_callback(update)
-    await show_text(
-        update,
-        tr(update.effective_user.id, "menu"),
-        main_keyboard(update.effective_user.id),
-    )
+    await show_text(update, tr(update.effective_user.id, "menu"), main_keyboard(update.effective_user.id))
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Глобальний обробник помилок: жодна необроблена помилка не має
+    призводити до падіння всього бота."""
     logger.exception("Unhandled exception: %s", context.error)
 
 
 # ============================================================
-# APPLICATION
+# 21. ЗАПУСК ДОДАТКУ
 # ============================================================
 
 async def post_init(application: Application) -> None:
-    # Polling and webhook mode must not run simultaneously.
+    # Webhook та polling не можуть працювати одночасно.
     await application.bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Webhook cleared; polling is ready")
+    logger.info("Webhook cleared; polling is ready. Data dir: %s", DATA_DIR)
 
 
 def build_application() -> Application:
@@ -2044,16 +2454,16 @@ def build_application() -> Application:
         .build()
     )
 
-    # Commands
+    # Команди
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_command))
 
-    # Language / main
+    # Мова / головне меню
     app.add_handler(CallbackQueryHandler(language_callback, pattern=r"^lang:"))
     app.add_handler(CallbackQueryHandler(language_handler, pattern=r"^language$"))
     app.add_handler(CallbackQueryHandler(main_handler, pattern=r"^main$"))
 
-    # Customer catalog
+    # Каталог клієнта
     app.add_handler(CallbackQueryHandler(catalog_handler, pattern=r"^catalog$"))
     app.add_handler(CallbackQueryHandler(category_handler, pattern=r"^cat:"))
     app.add_handler(CallbackQueryHandler(brand_handler, pattern=r"^brand:"))
@@ -2061,7 +2471,7 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(variants_handler, pattern=r"^variants:"))
     app.add_handler(CallbackQueryHandler(add_handler, pattern=r"^add:"))
 
-    # Cart / order
+    # Кошик / замовлення
     app.add_handler(CallbackQueryHandler(cart_handler, pattern=r"^cart$"))
     app.add_handler(CallbackQueryHandler(remove_last_handler, pattern=r"^remove_last$"))
     app.add_handler(CallbackQueryHandler(clear_cart_handler, pattern=r"^clear_cart$"))
@@ -2071,10 +2481,10 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(feedback_handler, pattern=r"^feedback$"))
     app.add_handler(CallbackQueryHandler(feedback_callback, pattern=r"^feedback:"))
 
-    # Admin main callbacks
+    # Всі адмін-callback'и (категорії, товари, замовлення, відгуки, статистика, розсилка)
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^adm:"))
 
-    # Photos first, then text.
+    # Спочатку фото, потім текст.
     app.add_handler(MessageHandler(filters.PHOTO, admin_photo_router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, customer_text_router))
 
@@ -2084,7 +2494,7 @@ def build_application() -> Application:
 
 
 def main() -> None:
-    logger.info("Bot started")
+    logger.info("Bot started. Admins: %s", ADMIN_IDS)
     build_application().run_polling(drop_pending_updates=True)
 
 
