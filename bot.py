@@ -2090,3 +2090,508 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+import json
+import logging
+import os
+import re
+import shutil
+from datetime import datetime, date
+from pathlib import Path
+from typing import Any, Optional
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest, Forbidden
+from telegram.ext import (
+    Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler,
+    ContextTypes, MessageHandler, filters,
+)
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.getenv("DATA_DIR") or os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or BASE_DIR)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+SEED_CATALOG_PATH = BASE_DIR / "catalog.json"
+CATALOG_PATH = DATA_DIR / "catalog.json"
+ORDERS_PATH = DATA_DIR / "orders.json"
+USERS_PATH = DATA_DIR / "users.json"
+REVIEWS_PATH = DATA_DIR / "reviews.json"
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "7212962967,5522897576").split(",") if x.strip().isdigit()}
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set")
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+log = logging.getLogger("shop_bot")
+
+LANGS = {"uk": "🇺🇦 Українська", "ru": "🇷🇺 Русский", "de": "🇩🇪 Deutsch", "en": "🇬🇧 English"}
+T = {
+    "uk": {
+        "welcome":"👋 Вітаємо!\n\nОберіть мову:","saved":"Мову збережено.","menu":"Оберіть дію:","catalog":"🛍 Каталог","cart":"🛒 Кошик","feedback":"⭐ Відгук","language":"🌐 Мова","back":"⬅️ Назад","home":"🏠 Головне меню","empty":"❌ Каталог порожній.","choose_cat":"Оберіть категорію:","choose_brand":"Оберіть бренд:","no_products":"❌ Товарів немає.","available":"✅ В наявності","unavailable":"❌ Немає в наявності","add":"🛒 Додати в кошик","added":"✅ Додано в кошик.","cart_empty":"🛒 Кошик порожній.","remove":"➖ Прибрати останній","clear":"🗑 Очистити кошик","checkout":"✅ Оформити замовлення","total":"Разом","city":"📍 Вкажіть місто або район доставки:","date":"📅 Вкажіть дату ДД.ММ.РРРР:","time":"🕒 Вкажіть час, наприклад 18:30 або 18:00-19:00:","payment":"💳 Як оплатити?","card":"💳 Карта","cash":"💵 Готівка","confirm":"✅ Підтвердити","cancel":"❌ Скасувати","sent":"✅ Замовлення прийнято!","failed":"❌ Не вдалося обробити запит.","bad_date":"❌ Некоректна дата.","bad_time":"❌ Некоректний час.","feedback_prompt":"⭐ Напишіть відгук одним повідомленням:","feedback_sent":"✅ Дякуємо за відгук!","not_found":"❌ Не знайдено."},
+    "ru": {"welcome":"👋 Добро пожаловать!\n\nВыберите язык:","saved":"Язык сохранён.","menu":"Выберите действие:","catalog":"🛍 Каталог","cart":"🛒 Корзина","feedback":"⭐ Отзыв","language":"🌐 Язык","back":"⬅️ Назад","home":"🏠 Главное меню","empty":"❌ Каталог пуст.","choose_cat":"Выберите категорию:","choose_brand":"Выберите бренд:","no_products":"❌ Товаров нет.","available":"✅ В наличии","unavailable":"❌ Нет в наличии","add":"🛒 Добавить в корзину","added":"✅ Добавлено в корзину.","cart_empty":"🛒 Корзина пуста.","remove":"➖ Убрать последний","clear":"🗑 Очистить корзину","checkout":"✅ Оформить заказ","total":"Итого","city":"📍 Укажите город или район доставки:","date":"📅 Укажите дату ДД.ММ.ГГГГ:","time":"🕒 Укажите время, например 18:30 или 18:00-19:00:","payment":"💳 Как оплатить?","card":"💳 Карта","cash":"💵 Наличные","confirm":"✅ Подтвердить","cancel":"❌ Отменить","sent":"✅ Заказ принят!","failed":"❌ Не удалось обработать запрос.","bad_date":"❌ Некорректная дата.","bad_time":"❌ Некорректное время.","feedback_prompt":"⭐ Напишите отзыв одним сообщением:","feedback_sent":"✅ Спасибо за отзыв!","not_found":"❌ Не найдено."},
+    "de": {"welcome":"👋 Willkommen!\n\nBitte Sprache wählen:","saved":"Sprache gespeichert.","menu":"Bitte wählen:","catalog":"🛍 Katalog","cart":"🛒 Warenkorb","feedback":"⭐ Bewertung","language":"🌐 Sprache","back":"⬅️ Zurück","home":"🏠 Hauptmenü","empty":"❌ Katalog ist leer.","choose_cat":"Kategorie auswählen:","choose_brand":"Marke auswählen:","no_products":"❌ Keine Produkte.","available":"✅ Verfügbar","unavailable":"❌ Nicht verfügbar","add":"🛒 In den Warenkorb","added":"✅ Hinzugefügt.","cart_empty":"🛒 Warenkorb ist leer.","remove":"➖ Letztes entfernen","clear":"🗑 Leeren","checkout":"✅ Bestellung aufgeben","total":"Gesamt","city":"📍 Stadt oder Bezirk eingeben:","date":"📅 Datum TT.MM.JJJJ:","time":"🕒 Zeit, z. B. 18:30 oder 18:00-19:00:","payment":"💳 Zahlungsart:","card":"💳 Karte","cash":"💵 Bar","confirm":"✅ Bestätigen","cancel":"❌ Abbrechen","sent":"✅ Bestellung angenommen!","failed":"❌ Anfrage fehlgeschlagen.","bad_date":"❌ Ungültiges Datum.","bad_time":"❌ Ungültige Zeit.","feedback_prompt":"⭐ Bitte Bewertung senden:","feedback_sent":"✅ Vielen Dank für Ihre Bewertung!","not_found":"❌ Nicht gefunden."},
+    "en": {"welcome":"👋 Welcome!\n\nChoose language:","saved":"Language saved.","menu":"Choose an action:","catalog":"🛍 Catalog","cart":"🛒 Cart","feedback":"⭐ Review","language":"🌐 Language","back":"⬅️ Back","home":"🏠 Main menu","empty":"❌ Catalog is empty.","choose_cat":"Choose a category:","choose_brand":"Choose a brand:","no_products":"❌ No products.","available":"✅ Available","unavailable":"❌ Out of stock","add":"🛒 Add to cart","added":"✅ Added to cart.","cart_empty":"🛒 Cart is empty.","remove":"➖ Remove last","clear":"🗑 Clear cart","checkout":"✅ Checkout","total":"Total","city":"📍 Enter delivery city/district:","date":"📅 Enter date DD.MM.YYYY:","time":"🕒 Enter time, e.g. 18:30 or 18:00-19:00:","payment":"💳 Payment method:","card":"💳 Card","cash":"💵 Cash","confirm":"✅ Confirm","cancel":"❌ Cancel","sent":"✅ Order received!","failed":"❌ Request failed.","bad_date":"❌ Invalid date.","bad_time":"❌ Invalid time.","feedback_prompt":"⭐ Please write your review:","feedback_sent":"✅ Thank you for your review!","not_found":"❌ Not found."},
+}
+STATUS = {"new":"🆕 Нове","confirmed":"✅ Підтверджено","processing":"⚙️ В роботі","ready":"📦 Готове","delivering":"🚚 Доставляється","completed":"🏁 Завершено","cancelled":"❌ Скасовано"}
+STATUS_USER = {
+    "new": {"uk":"🆕 Ваше замовлення отримано.","ru":"🆕 Ваш заказ получен.","de":"🆕 Ihre Bestellung wurde erhalten.","en":"🆕 Your order has been received."},
+    "confirmed": {"uk":"✅ Замовлення підтверджено.","ru":"✅ Заказ подтверждён.","de":"✅ Bestellung bestätigt.","en":"✅ Order confirmed."},
+    "processing": {"uk":"⚙️ Замовлення взято в роботу.","ru":"⚙️ Заказ взят в работу.","de":"⚙️ Bestellung wird bearbeitet.","en":"⚙️ Order is being processed."},
+    "ready": {"uk":"📦 Замовлення готове.","ru":"📦 Заказ готов.","de":"📦 Bestellung ist fertig.","en":"📦 Order is ready."},
+    "delivering": {"uk":"🚚 Замовлення передано на доставку.","ru":"🚚 Заказ передан в доставку.","de":"🚚 Bestellung ist unterwegs.","en":"🚚 Order is out for delivery."},
+    "completed": {"uk":"🏁 Замовлення завершено. Дякуємо!","ru":"🏁 Заказ завершён. Спасибо!","de":"🏁 Bestellung abgeschlossen. Danke!","en":"🏁 Order completed. Thank you!"},
+    "cancelled": {"uk":"❌ Замовлення скасовано.","ru":"❌ Заказ отменён.","de":"❌ Bestellung storniert.","en":"❌ Order cancelled."},
+}
+
+# ---------- storage ----------
+def read_json(path: Path, default: Any):
+    try:
+        if not path.exists(): return default
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        log.exception("read %s", path); return default
+
+def write_json(path: Path, data: Any) -> bool:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path); return True
+    except Exception:
+        log.exception("write %s", path)
+        try: tmp.unlink(missing_ok=True)
+        except OSError: pass
+        return False
+
+def load_catalog():
+    if not CATALOG_PATH.exists() and SEED_CATALOG_PATH.exists() and CATALOG_PATH != SEED_CATALOG_PATH:
+        try: shutil.copy2(SEED_CATALOG_PATH, CATALOG_PATH)
+        except OSError: log.exception("seed catalog")
+    c = read_json(CATALOG_PATH, {"currency":"EUR","categories":{}})
+    if not isinstance(c, dict): c = {"currency":"EUR","categories":{}}
+    if not isinstance(c.get("categories"), dict): c["categories"] = {}
+    c.setdefault("currency", "EUR"); return c
+CATALOG = load_catalog()
+
+def save_catalog(): return write_json(CATALOG_PATH, CATALOG)
+def users():
+    x=read_json(USERS_PATH,{})
+    return x if isinstance(x,dict) else {}
+def orders():
+    x=read_json(ORDERS_PATH,[])
+    return x if isinstance(x,list) else []
+def reviews():
+    x=read_json(REVIEWS_PATH,[])
+    return x if isinstance(x,list) else []
+
+def lang(uid):
+    r=users().get(str(uid),{}); l=r.get("language") if isinstance(r,dict) else None
+    return l if l in LANGS else "uk"
+def tr(uid,key): return T.get(lang(uid),T["uk"]).get(key,T["uk"].get(key,key))
+def register(update):
+    u=update.effective_user
+    if not u:return
+    us=users(); r=us.setdefault(str(u.id),{})
+    r.update({"user_id":u.id,"username":u.username,"full_name":u.full_name,"updated_at":datetime.now().isoformat(timespec="seconds")})
+    r.setdefault("language","uk"); write_json(USERS_PATH,us)
+def set_lang(uid,l):
+    us=users(); us.setdefault(str(uid),{})["language"]=l; write_json(USERS_PATH,us)
+
+# ---------- catalog ----------
+def cats(): return CATALOG["categories"]
+def cat(ck): return cats().get(ck) if isinstance(cats().get(ck),dict) else None
+def brands(ck):
+    c=cat(ck)
+    if not c:return {}
+    if not isinstance(c.get("brands"),dict): c["brands"]={}
+    return c["brands"]
+def brand(ck,bk): return brands(ck).get(bk) if isinstance(brands(ck).get(bk),dict) else None
+def items(b): return b.get("items",[]) if isinstance(b,dict) and isinstance(b.get("items",[]),list) else []
+def product(ck,bk,i):
+    b=brand(ck,bk)
+    try:
+        p=items(b)[i]
+        return p if isinstance(p,dict) else None
+    except (IndexError,TypeError): return None
+def available(p): return p.get("in_stock",True) is True and p.get("hidden",False) is not True
+def money(v):
+    try:return f"{float(v):.2f} {CATALOG.get('currency','EUR')}"
+    except:return f"{v} {CATALOG.get('currency','EUR')}"
+def all_products(include_hidden=True):
+    out=[]
+    for ck,c in cats().items():
+        if not isinstance(c,dict):continue
+        for bk,b in brands(ck).items():
+            for i,p in enumerate(items(b)):
+                if isinstance(p,dict) and (include_hidden or not p.get("hidden")):out.append((ck,bk,i,p))
+    return out
+def key(prefix,coll):
+    i=1
+    while f"{prefix}_{i}" in coll:i+=1
+    return f"{prefix}_{i}"
+
+# ---------- UI ----------
+def kb(rows): return InlineKeyboardMarkup(rows)
+def lang_kb(): return kb([[InlineKeyboardButton(v,callback_data=f"lang:{k}")] for k,v in LANGS.items()])
+def main_kb(uid): return kb([[InlineKeyboardButton(tr(uid,"catalog"),callback_data="catalog")],[InlineKeyboardButton(tr(uid,"cart"),callback_data="cart")],[InlineKeyboardButton(tr(uid,"feedback"),callback_data="feedback")],[InlineKeyboardButton(tr(uid,"language"),callback_data="language")]])
+def admin_kb():
+    return kb([
+        [InlineKeyboardButton("📦 Замовлення",callback_data="adm:orders"),InlineKeyboardButton("🛠 Товари",callback_data="adm:products")],
+        [InlineKeyboardButton("📁 Категорії",callback_data="adm:categories"),InlineKeyboardButton("⭐ Відгуки",callback_data="adm:reviews")],
+        [InlineKeyboardButton("➕ Додати товар",callback_data="adm:addproduct"),InlineKeyboardButton("📊 Статистика",callback_data="adm:stats")],
+        [InlineKeyboardButton("📣 Розсилка",callback_data="adm:broadcast")],
+    ])
+async def ack(q):
+    if q:
+        try: await q.answer()
+        except BadRequest: pass
+async def show(update,text,markup=None,photo=None,context=None):
+    q=update.callback_query
+    if photo and update.effective_chat and context:
+        try:
+            await context.bot.send_photo(update.effective_chat.id,photo=photo,caption=text,reply_markup=markup); return
+        except Exception: log.exception("send photo")
+    if q:
+        try: await q.edit_message_text(text,reply_markup=markup); return
+        except BadRequest as e:
+            if "not modified" in str(e).lower(): return
+    if update.effective_chat: await update.effective_chat.send_message(text,reply_markup=markup)
+
+def admin_ok(update): return bool(update.effective_user and update.effective_user.id in ADMIN_IDS)
+async def deny(update): await ack(update.callback_query); await show(update,"⛔ Доступ заборонено.")
+
+# ---------- customer ----------
+async def start(update,context):
+    register(update); context.user_data.clear(); await update.effective_message.reply_text(tr(update.effective_user.id,"welcome"),reply_markup=lang_kb())
+async def language(update,context): await ack(update.callback_query); await show(update,tr(update.effective_user.id,"language"),lang_kb())
+async def language_cb(update,context):
+    await ack(update.callback_query); l=update.callback_query.data.split(":",1)[1]
+    if l in LANGS:set_lang(update.effective_user.id,l); register(update); await show(update,f"{T[l]['saved']}\n\n{T[l]['menu']}",main_kb(update.effective_user.id))
+async def main(update,context): register(update); await ack(update.callback_query); await show(update,tr(update.effective_user.id,"menu"),main_kb(update.effective_user.id))
+async def catalog(update,context):
+    await ack(update.callback_query); rows=[]
+    for ck,c in cats().items():
+        if isinstance(c,dict) and not c.get("hidden"):rows.append([InlineKeyboardButton(str(c.get("title",ck)),callback_data=f"cat:{ck}")])
+    rows.append([InlineKeyboardButton(tr(update.effective_user.id,"home"),callback_data="main")])
+    await show(update,tr(update.effective_user.id,"choose_cat") if rows[:-1] else tr(update.effective_user.id,"empty"),kb(rows))
+async def category(update,context):
+    await ack(update.callback_query); ck=update.callback_query.data.split(":",1)[1]; c=cat(ck)
+    if not c:return await show(update,tr(update.effective_user.id,"not_found"))
+    rows=[]
+    for bk,b in brands(ck).items():
+        if isinstance(b,dict) and any(isinstance(p,dict) and not p.get("hidden") for p in items(b)):
+            rows.append([InlineKeyboardButton(str(b.get("title",bk)),callback_data=f"brand:{ck}:{bk}")])
+    rows.append([InlineKeyboardButton(tr(update.effective_user.id,"back"),callback_data="catalog")])
+    await show(update,f"📁 {c.get('title',ck)}\n\n{tr(update.effective_user.id,'choose_brand')}",kb(rows),photo=c.get("photo"),context=context)
+async def brand_cb(update,context):
+    await ack(update.callback_query); parts=update.callback_query.data.split(":")
+    if len(parts)!=3:return
+    _,ck,bk=parts;b=brand(ck,bk)
+    if not b:return await show(update,tr(update.effective_user.id,"not_found"))
+    rows=[]
+    for i,p in enumerate(items(b)):
+        if not isinstance(p,dict) or p.get("hidden"):continue
+        icon="✅" if p.get("in_stock",True) else "❌"
+        rows.append([InlineKeyboardButton(f"{p.get('name','Товар')} — {money(p.get('price',0))} {icon}",callback_data=f"product:{ck}:{bk}:{i}")])
+    rows += [[InlineKeyboardButton(tr(update.effective_user.id,"cart"),callback_data="cart")],[InlineKeyboardButton(tr(update.effective_user.id,"back"),callback_data=f"cat:{ck}")]]
+    await show(update,str(b.get("title",bk)),kb(rows))
+async def product_cb(update,context):
+    await ack(update.callback_query); parts=update.callback_query.data.split(":")
+    if len(parts)!=4:return
+    _,ck,bk,it=parts
+    try:i=int(it)
+    except:return
+    p=product(ck,bk,i)
+    if not p or p.get("hidden"):return await show(update,tr(update.effective_user.id,"not_found"))
+    status=tr(update.effective_user.id,"available") if p.get("in_stock",True) else tr(update.effective_user.id,"unavailable")
+    rows=[]
+    if p.get("in_stock",True):rows.append([InlineKeyboardButton(tr(update.effective_user.id,"add"),callback_data=f"add:{ck}:{bk}:{i}")])
+    rows.append([InlineKeyboardButton(tr(update.effective_user.id,"back"),callback_data=f"brand:{ck}:{bk}")])
+    await show(update,f"🧾 {p.get('name')}\n💶 {money(p.get('price'))}\n{status}",kb(rows),photo=p.get("photo"),context=context)
+async def add(update,context):
+    await ack(update.callback_query); parts=update.callback_query.data.split(":")
+    if len(parts)!=4:return
+    _,ck,bk,it=parts
+    try:i=int(it)
+    except:return
+    p=product(ck,bk,i)
+    if not p or not available(p):return await show(update,tr(update.effective_user.id,"not_found"))
+    context.user_data.setdefault("cart",[]).append({"name":str(p.get("name")),"price":float(p.get("price",0)),"source":[ck,bk,i]})
+    await show(update,f"{tr(update.effective_user.id,'added')}\n\n🧾 {p.get('name')} — {money(p.get('price'))}",kb([[InlineKeyboardButton(tr(update.effective_user.id,"catalog"),callback_data="catalog")],[InlineKeyboardButton(tr(update.effective_user.id,"cart"),callback_data="cart")]]))
+def cart_get(c):return c.user_data.setdefault("cart",[])
+def cart_total(c):return round(sum(float(x.get("price",0)) for x in c),2)
+async def cart(update,context):
+    await ack(update.callback_query); c=cart_get(context)
+    if not c:return await show(update,tr(update.effective_user.id,"cart_empty"),main_kb(update.effective_user.id))
+    text="🛒 Кошик\n\n"+"\n".join(f"{i}. {x['name']} — {money(x['price'])}" for i,x in enumerate(c,1))+f"\n\n💰 {tr(update.effective_user.id,'total')}: {money(cart_total(c))}"
+    await show(update,text,kb([[InlineKeyboardButton(tr(update.effective_user.id,"remove"),callback_data="remove_last")],[InlineKeyboardButton(tr(update.effective_user.id,"clear"),callback_data="clear_cart")],[InlineKeyboardButton(tr(update.effective_user.id,"checkout"),callback_data="checkout")],[InlineKeyboardButton(tr(update.effective_user.id,"catalog"),callback_data="catalog")]]))
+async def remove_last(update,context): await ack(update.callback_query); c=cart_get(context); c.pop() if c else None; await cart(update,context)
+async def clear_cart(update,context): await ack(update.callback_query); context.user_data["cart"]=[]; await show(update,tr(update.effective_user.id,"cart_empty"),main_kb(update.effective_user.id))
+
+# ---------- order/review ----------
+def valid_time(s): return bool(re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d(?:\s*-\s*(?:[01]\d|2[0-3]):[0-5]\d)?",s.strip()))
+async def checkout(update,context):
+    await ack(update.callback_query)
+    if not cart_get(context):return await show(update,tr(update.effective_user.id,"cart_empty"))
+    context.user_data["order_flow"]={"step":"city"}; await show(update,tr(update.effective_user.id,"city"),kb([[InlineKeyboardButton(tr(update.effective_user.id,"cancel"),callback_data="order:cancel")]]))
+async def payment(update,context):
+    await ack(update.callback_query); f=context.user_data.get("order_flow")
+    if not isinstance(f,dict):return
+    m=update.callback_query.data.split(":",1)[1]; f["payment"]={"card":tr(update.effective_user.id,"card"),"cash":tr(update.effective_user.id,"cash")}.get(m)
+    if not f["payment"]:return
+    f["step"]="confirm"; c=cart_get(context)
+    text=f"📦 {tr(update.effective_user.id,'confirm')}\n\n📍 {f['city']}\n📅 {f['date']}\n🕒 {f['time']}\n💳 {f['payment']}\n\n"+"\n".join(f"• {x['name']} — {money(x['price'])}" for x in c)+f"\n\n💰 {money(cart_total(c))}"
+    await show(update,text,kb([[InlineKeyboardButton(tr(update.effective_user.id,"confirm"),callback_data="order:confirm")],[InlineKeyboardButton(tr(update.effective_user.id,"cancel"),callback_data="order:cancel")]]))
+async def order_cb(update,context):
+    await ack(update.callback_query); action=update.callback_query.data.split(":",1)[1]
+    if action=="cancel":context.user_data.pop("order_flow",None);await show(update,tr(update.effective_user.id,"menu"),main_kb(update.effective_user.id));return
+    if action!="confirm":return
+    f=context.user_data.get("order_flow"); c=cart_get(context); u=update.effective_user
+    if not isinstance(f,dict) or not c:return await show(update,tr(u.id,"failed"))
+    now=datetime.now(); oid=f"{u.id}-{int(now.timestamp())}"
+    o={"order_id":oid,"user_id":u.id,"username":u.username,"full_name":u.full_name,"language":lang(u.id),"items":c.copy(),"total":cart_total(c),"payment":f["payment"],"delivery":{"city_or_district":f["city"],"date":f["date"],"time":f["time"]},"created_at":now.isoformat(timespec="seconds"),"updated_at":now.isoformat(timespec="seconds"),"status":"new"}
+    os=orders();os.append(o)
+    if not write_json(ORDERS_PATH,os[-5000:]):return await show(update,tr(u.id,"failed"))
+    context.user_data["cart"]=[];context.user_data.pop("order_flow",None)
+    text=admin_order_text(o)
+    for aid in ADMIN_IDS:
+        try:await context.bot.send_message(aid,text=text,reply_markup=order_status_kb(oid))
+        except Exception:log.exception("notify admin order")
+    await show(update,tr(u.id,"sent"),main_kb(u.id))
+def admin_order_text(o):
+    return f"📦 НОВЕ ЗАМОВЛЕННЯ #{o['order_id']}\n\n👤 {o['full_name']} (@{o.get('username') or '-'})\n🆔 {o['user_id']}\n\n"+"\n".join(f"• {x['name']} — {money(x['price'])}" for x in o['items'])+f"\n\n💰 {money(o['total'])}\n📍 {o['delivery']['city_or_district']}\n📅 {o['delivery']['date']}\n🕒 {o['delivery']['time']}\n💳 {o['payment']}\n📌 {STATUS.get(o.get('status','new'))}"
+def order_status_kb(oid): return kb([[InlineKeyboardButton("🆕 Нове",callback_data=f"adm:ost:{oid}:new"),InlineKeyboardButton("✅ Підтвердити",callback_data=f"adm:ost:{oid}:confirmed")],[InlineKeyboardButton("⚙️ В роботі",callback_data=f"adm:ost:{oid}:processing"),InlineKeyboardButton("📦 Готове",callback_data=f"adm:ost:{oid}:ready")],[InlineKeyboardButton("🚚 Доставка",callback_data=f"adm:ost:{oid}:delivering"),InlineKeyboardButton("🏁 Завершити",callback_data=f"adm:ost:{oid}:completed")],[InlineKeyboardButton("❌ Скасувати",callback_data=f"adm:ost:{oid}:cancelled")]])
+async def feedback(update,context): await ack(update.callback_query);context.user_data["feedback_flow"]=True;await show(update,tr(update.effective_user.id,"feedback_prompt"),kb([[InlineKeyboardButton(tr(update.effective_user.id,"cancel"),callback_data="feedback:cancel")]]))
+async def feedback_cb(update,context):
+    await ack(update.callback_query)
+    if update.callback_query.data.endswith(":cancel"):context.user_data.pop("feedback_flow",None);await show(update,tr(update.effective_user.id,"menu"),main_kb(update.effective_user.id))
+
+# ---------- admin ----------
+async def admin_cmd(update,context):
+    register(update)
+    if not admin_ok(update):return await update.effective_message.reply_text("⛔ Доступ заборонено.")
+    context.user_data.pop("admin_flow",None);await update.effective_message.reply_text("⚙️ Адмін-панель",reply_markup=admin_kb())
+async def admin_cb(update,context):
+    await ack(update.callback_query)
+    if not admin_ok(update):return await deny(update)
+    a=update.callback_query.data[4:]
+    if a=="home":return await show(update,"⚙️ Адмін-панель",admin_kb())
+    if a=="categories":return await admin_categories(update)
+    if a=="products":return await admin_products(update)
+    if a=="addproduct":return await admin_addproduct(update,context)
+    if a=="orders":return await admin_orders(update)
+    if a=="reviews":return await admin_reviews(update)
+    if a=="stats":return await admin_stats(update)
+    if a=="broadcast":context.user_data["admin_flow"]={"step":"broadcast"};return await show(update,"📣 Надішліть текст розсилки.",kb([[InlineKeyboardButton("❌ Скасувати",callback_data="adm:home")]]))
+    if a.startswith("cat:"):return await admin_cat(update,a.split(":",1)[1])
+    if a.startswith("renamecat:"):context.user_data["admin_flow"]={"step":"renamecat","ck":a.split(":",1)[1]};return await show(update,"✏️ Нова назва категорії:")
+    if a.startswith("catphoto:"):context.user_data["admin_flow"]={"step":"catphoto","ck":a.split(":",1)[1]};return await show(update,"🖼 Надішліть фото:")
+    if a.startswith("delcat:"):
+        ck=a.split(":",1)[1];cats().pop(ck,None);save_catalog();return await admin_categories(update)
+    if a.startswith("brand:"):return await admin_brand(update,a.split(":",1)[1])
+    if a.startswith("branditems:"):
+        _,ck,bk=a.split(":",2);return await admin_branditems(update,ck,bk)
+    if a.startswith("item:"):
+        _,ck,bk,it=a.split(":");return await admin_item(update,context,ck,bk,int(it))
+    if a.startswith("toggle:"):
+        _,ck,bk,it=a.split(":");p=product(ck,bk,int(it));
+        if p:p["in_stock"]=not p.get("in_stock",True);save_catalog()
+        return await admin_item(update,context,ck,bk,int(it))
+    if a.startswith("hide:") or a.startswith("unhide:"):
+        cmd,ck,bk,it=a.split(":");p=product(ck,bk,int(it));
+        if p:p["hidden"]=cmd=="hide";save_catalog()
+        return await admin_item(update,context,ck,bk,int(it))
+    if a.startswith("delete:"):
+        _,ck,bk,it=a.split(":");b=brand(ck,bk)
+        if b and 0<=int(it)<len(items(b)):items(b).pop(int(it));save_catalog()
+        return await admin_branditems(update,ck,bk)
+    if a.startswith("editname:"):
+        _,ck,bk,it=a.split(":");context.user_data["admin_flow"]={"step":"editname","ck":ck,"bk":bk,"i":int(it)};return await show(update,"✏️ Нова назва:")
+    if a.startswith("editprice:"):
+        _,ck,bk,it=a.split(":");context.user_data["admin_flow"]={"step":"editprice","ck":ck,"bk":bk,"i":int(it)};return await show(update,"💶 Нова ціна:")
+    if a.startswith("photo:"):
+        _,ck,bk,it=a.split(":");context.user_data["admin_flow"]={"step":"productphoto","ck":ck,"bk":bk,"i":int(it)};return await show(update,"🖼 Надішліть нове фото:")
+    if a.startswith("addcat"):
+        context.user_data["admin_flow"]={"step":"addcat"};return await show(update,"📁 Назва категорії:")
+    if a.startswith("addprodcat:"):
+        return await admin_addbrand(update,context,a.split(":",1)[1])
+    if a.startswith("addprodbk:"):
+        _,ck,bk=a.split(":");context.user_data["admin_flow"]={"step":"addname","ck":ck,"bk":bk};return await show(update,"➕ Назва товару:")
+    if a.startswith("ost:"):
+        _,oid,status=a.split(":",2);return await change_order_status(update,oid,status)
+    if a.startswith("review:"):
+        _,rid,action=a.split(":");return await review_action(update,rid,action)
+
+def page_rows(entries,prefix):
+    return [[InlineKeyboardButton(str(x[0]),callback_data=f"{prefix}:{x[1]}")] for x in entries]
+async def admin_categories(update):
+    rows=[[InlineKeyboardButton(f"📁 {c.get('title',ck)}",callback_data=f"adm:cat:{ck}")] for ck,c in cats().items() if isinstance(c,dict)]
+    rows += [[InlineKeyboardButton("➕ Додати категорію",callback_data="adm:addcat")],[InlineKeyboardButton("⬅️ Адмін",callback_data="adm:home")]]
+    await show(update,"📁 Категорії",kb(rows))
+async def admin_cat(update,ck):
+    c=cat(ck)
+    if not c:return await show(update,"❌ Не знайдено.")
+    await show(update,f"📁 {c.get('title',ck)}",kb([[InlineKeyboardButton("✏️ Назва",callback_data=f"adm:renamecat:{ck}")],[InlineKeyboardButton("🖼 Фото",callback_data=f"adm:catphoto:{ck}")],[InlineKeyboardButton("🗑 Видалити",callback_data=f"adm:delcat:{ck}")],[InlineKeyboardButton("⬅️ Категорії",callback_data="adm:categories")]]),photo=c.get("photo"),context=None)
+async def admin_products(update):
+    rows=[[InlineKeyboardButton(f"📁 {c.get('title',ck)}",callback_data=f"adm:brand:{ck}")] for ck,c in cats().items() if isinstance(c,dict)]
+    rows += [[InlineKeyboardButton("➕ Додати товар",callback_data="adm:addproduct")],[InlineKeyboardButton("⬅️ Адмін",callback_data="adm:home")]]
+    await show(update,"🛠 Товари — оберіть категорію",kb(rows))
+async def admin_brand(update,ck):
+    rows=[]
+    for bk,b in brands(ck).items():rows.append([InlineKeyboardButton(f"🏷 {b.get('title',bk)}",callback_data=f"adm:branditems:{ck}:{bk}")])
+    rows.append([InlineKeyboardButton("⬅️ Товари",callback_data="adm:products")]);await show(update,f"📁 {cat(ck).get('title',ck)}",kb(rows))
+async def admin_branditems(update,ck,bk):
+    b=brand(ck,bk);rows=[]
+    if b:
+        for i,p in enumerate(items(b)):
+            if isinstance(p,dict):
+                icon="👁️" if p.get("hidden") else ("✅" if p.get("in_stock",True) else "❌")
+                rows.append([InlineKeyboardButton(f"{icon} {p.get('name','Товар')}",callback_data=f"adm:item:{ck}:{bk}:{i}")])
+    rows += [[InlineKeyboardButton("➕ Додати товар",callback_data=f"adm:addprodbk:{ck}:{bk}")],[InlineKeyboardButton("⬅️ Назад",callback_data=f"adm:brand:{ck}")]]
+    await show(update,f"🏷 {b.get('title',bk) if b else bk}",kb(rows))
+async def admin_item(update,context,ck,bk,i):
+    p=product(ck,bk,i)
+    if not p:return await show(update,"❌ Товар не знайдено.")
+    hidden=p.get("hidden",False); stock=p.get("in_stock",True)
+    rows=[[InlineKeyboardButton("✏️ Назва",callback_data=f"adm:editname:{ck}:{bk}:{i}"),InlineKeyboardButton("💶 Ціна",callback_data=f"adm:editprice:{ck}:{bk}:{i}")],[InlineKeyboardButton("🔄 Наявність",callback_data=f"adm:toggle:{ck}:{bk}:{i}"),InlineKeyboardButton("🖼 Фото",callback_data=f"adm:photo:{ck}:{bk}:{i}")],[InlineKeyboardButton("👁️ Показати" if hidden else "🙈 Приховати",callback_data=f"adm:{'unhide' if hidden else 'hide'}:{ck}:{bk}:{i}"),InlineKeyboardButton("🗑 Видалити",callback_data=f"adm:delete:{ck}:{bk}:{i}")],[InlineKeyboardButton("⬅️ Назад",callback_data=f"adm:branditems:{ck}:{bk}")]]
+    await show(update,f"🧾 {p.get('name')}\n💶 {money(p.get('price'))}\n{'🙈 Приховано' if hidden else ('✅ В наявності' if stock else '❌ Немає')}",kb(rows),photo=p.get("photo"),context=context)
+async def admin_addproduct(update,context):
+    rows=[[InlineKeyboardButton(str(c.get('title',ck)),callback_data=f"adm:addprodcat:{ck}")] for ck,c in cats().items() if isinstance(c,dict)]
+    rows.append([InlineKeyboardButton("⬅️ Адмін",callback_data="adm:home")]);await show(update,"➕ Виберіть категорію",kb(rows))
+async def admin_addbrand(update,context,ck):
+    b=brands(ck)
+    if not b:
+        bk="brand_1";b[bk]={"title":"Товари","items":[]};save_catalog()
+    rows=[[InlineKeyboardButton(str(v.get('title',k)),callback_data=f"adm:addprodbk:{ck}:{k}")] for k,v in b.items() if isinstance(v,dict)]
+    rows.append([InlineKeyboardButton("⬅️ Назад",callback_data="adm:products")]);await show(update,"🏷 Виберіть бренд/розділ",kb(rows))
+async def admin_orders(update):
+    os=orders();rows=[]
+    for o in reversed(os[-50:]):rows.append([InlineKeyboardButton(f"#{o.get('order_id')} • {money(o.get('total',0))} • {STATUS.get(o.get('status','new'))}",callback_data=f"adm:order:{o.get('order_id')}")])
+    rows.append([InlineKeyboardButton("⬅️ Адмін",callback_data="adm:home")]);await show(update,"📦 Усі замовлення",kb(rows))
+async def admin_reviews(update):
+    rs=reviews();rows=[]
+    for r in reversed(rs[-50:]):rows.append([InlineKeyboardButton(f"#{r.get('id')} • {'👁️' if r.get('visible',True) else '🙈'} {str(r.get('text',''))[:35]}",callback_data=f"adm:review:{r.get('id')}:detail")])
+    rows.append([InlineKeyboardButton("⬅️ Адмін",callback_data="adm:home")]);await show(update,"⭐ Відгуки\n\nКнопка перемикає видимість. Видалення — окремо нижче в картці відгуку.",kb(rows))
+async def admin_stats(update):
+    os=orders();completed=[o for o in os if o.get('status')!='cancelled'];revenue=sum(float(o.get('total',0)) for o in completed)
+    counts={}
+    for o in completed:
+        for x in o.get('items',[]):counts[x.get('name','?')]=counts.get(x.get('name','?'),0)+1
+    top=sorted(counts.items(),key=lambda x:x[1],reverse=True)[:10]
+    text=f"📊 Статистика\n\n👥 Користувачів: {len(users())}\n📦 Усього замовлень: {len(os)}\n💰 Дохід (без скасованих): {revenue:.2f} {CATALOG.get('currency','EUR')}\n🛍 Товарів: {len(all_products())}\n📁 Категорій: {len(cats())}\n⭐ Відгуків: {len(reviews())}\n\n🔥 Популярні товари:\n"+('\n'.join(f"• {n}: {q}" for n,q in top) or '—')
+    await show(update,text,kb([[InlineKeyboardButton("⬅️ Адмін",callback_data="adm:home")]]))
+async def change_order_status(update,oid,status):
+    os=orders();found=None
+    for o in os:
+        if str(o.get('order_id'))==str(oid):found=o;break
+    if not found:return await show(update,"❌ Замовлення не знайдено.")
+    old=found.get('status');found['status']=status;found['updated_at']=datetime.now().isoformat(timespec='seconds');write_json(ORDERS_PATH,os)
+    try:
+        l=found.get('language') if found.get('language') in LANGS else lang(int(found.get('user_id')))
+        await update.get_bot().send_message(int(found['user_id']),STATUS_USER[status][l]+f"\n\n#{oid}")
+    except Exception:log.exception("status notify")
+    await show(update,f"#{oid}\n\n{STATUS.get(old,old)} → {STATUS.get(status,status)}",kb([[InlineKeyboardButton("⬅️ Замовлення",callback_data="adm:orders")],[InlineKeyboardButton("⚙️ Адмін",callback_data="adm:home")]]))
+async def review_action(update,rid,action):
+    rs=reviews();r=next((x for x in rs if str(x.get('id'))==str(rid)),None)
+    if not r:return await show(update,"❌ Відгук не знайдено.")
+    if action=="delete":
+        rs=[x for x in rs if str(x.get('id'))!=str(rid)]
+        write_json(REVIEWS_PATH,rs);return await admin_reviews(update)
+    if action=="toggle":
+        r['visible']=not r.get('visible',True);write_json(REVIEWS_PATH,rs);return await admin_reviews(update)
+    await show(update, f"⭐ Відгук #{rid}\n\n👤 {r.get('full_name','')} (@{r.get('username') or '-'})\n🆔 {r.get('user_id')}\n\n💬 {r.get('text','')}\n\n{'👁️ Видимий' if r.get('visible',True) else '🙈 Прихований'}", kb([[InlineKeyboardButton('👁️/🙈 Перемкнути видимість',callback_data=f'adm:review:{rid}:toggle')],[InlineKeyboardButton('🗑 Видалити',callback_data=f'adm:review:{rid}:delete')],[InlineKeyboardButton('⬅️ Відгуки',callback_data='adm:reviews')]]))
+
+# ---------- text/photo ----------
+async def text_router(update,context):
+    register(update);text=update.message.text.strip() if update.message and update.message.text else ""
+    if admin_ok(update) and context.user_data.get("admin_flow"):
+        f=context.user_data['admin_flow'];s=f.get('step')
+        if s=="broadcast":
+            context.user_data.pop('admin_flow',None);sent=0
+            for uid in list(users()):
+                try:await context.bot.send_message(int(uid),text);sent+=1
+                except (Forbidden,Exception):pass
+            return await update.message.reply_text(f"📣 Розсилку завершено. Надіслано: {sent}",reply_markup=admin_kb())
+        if s=="addcat":
+            ck=key('category',cats());cats()[ck]={"title":text,"brands":{}};save_catalog();context.user_data.pop('admin_flow');return await update.message.reply_text("✅ Категорію додано.",reply_markup=admin_kb())
+        if s=="renamecat":
+            c=cat(f['ck']);c['title']=text if c else text;save_catalog();context.user_data.pop('admin_flow');return await update.message.reply_text("✅ Назву змінено.",reply_markup=admin_kb())
+        if s=="editname":
+            p=product(f['ck'],f['bk'],f['i']);
+            if p:p['name']=text;save_catalog()
+            context.user_data.pop('admin_flow');return await update.message.reply_text("✅ Назву змінено.",reply_markup=admin_kb())
+        if s=="editprice":
+            try:v=float(text.replace(',','.'));assert v>=0
+            except: return await update.message.reply_text("❌ Введіть коректну ціну, наприклад 19.99")
+            p=product(f['ck'],f['bk'],f['i']);
+            if p:p['price']=v;save_catalog()
+            context.user_data.pop('admin_flow');return await update.message.reply_text("✅ Ціну змінено.",reply_markup=admin_kb())
+        if s=="addname":
+            f['name']=text;f['step']='addprice';return await update.message.reply_text("💶 Ціна:")
+        if s=="addprice":
+            try:v=float(text.replace(',','.'));assert v>=0
+            except:return await update.message.reply_text("❌ Некоректна ціна.")
+            f['price']=v;f['step']='addstock';return await update.message.reply_text("Товар у наявності? так/ні")
+        if s=="addstock":
+            if text.lower() not in {'так','да','yes','ja','ні','нет','no','nein'}:return await update.message.reply_text("❌ Так/ні")
+            p={"name":f['name'],"price":f['price'],"in_stock":text.lower() in {'так','да','yes','ja'},"hidden":False};
+            if f.get('photo'):p['photo']=f['photo']
+            brand(f['ck'],f['bk']).setdefault('items',[]).append(p);save_catalog();context.user_data.pop('admin_flow');return await update.message.reply_text("✅ Товар додано.",reply_markup=admin_kb())
+    if context.user_data.get('feedback_flow'):
+        uid=update.effective_user.id;rs=reviews();rs.append({'id':f"{uid}-{int(datetime.now().timestamp())}",'user_id':uid,'full_name':update.effective_user.full_name,'username':update.effective_user.username,'text':text,'visible':True,'created_at':datetime.now().isoformat(timespec='seconds')});write_json(REVIEWS_PATH,rs);context.user_data.pop('feedback_flow');
+        for aid in ADMIN_IDS:
+            try:await context.bot.send_message(aid,f"⭐ НОВИЙ ВІДГУК\n\n👤 {update.effective_user.full_name}\n🆔 {uid}\n\n💬 {text}")
+            except Exception:pass
+        return await update.message.reply_text(tr(uid,'feedback_sent'),reply_markup=main_kb(uid))
+    f=context.user_data.get('order_flow')
+    if not isinstance(f,dict):return
+    uid=update.effective_user.id;s=f.get('step')
+    if s=='city':
+        if len(text)<2:return await update.message.reply_text("❌ Вкажіть місто/район детальніше.")
+        f['city']=text;f['step']='date';return await update.message.reply_text(tr(uid,'date'))
+    if s=='date':
+        try:d=datetime.strptime(text,'%d.%m.%Y').date();assert d>=date.today()
+        except:return await update.message.reply_text(tr(uid,'bad_date'))
+        f['date']=text;f['step']='time';return await update.message.reply_text(tr(uid,'time'))
+    if s=='time':
+        if not valid_time(text):return await update.message.reply_text(tr(uid,'bad_time'))
+        f['time']=text;f['step']='payment';return await update.message.reply_text(tr(uid,'payment'),reply_markup=kb([[InlineKeyboardButton(tr(uid,'card'),callback_data='payment:card')],[InlineKeyboardButton(tr(uid,'cash'),callback_data='payment:cash')],[InlineKeyboardButton(tr(uid,'cancel'),callback_data='order:cancel')]]))
+async def photo_router(update,context):
+    if not admin_ok(update) or not update.message:return
+    f=context.user_data.get('admin_flow');
+    if not isinstance(f,dict):return
+    pid=update.message.photo[-1].file_id;s=f.get('step')
+    if s=='catphoto':
+        c=cat(f['ck']);
+        if c:c['photo']=pid;save_catalog()
+        context.user_data.pop('admin_flow');return await update.message.reply_text("✅ Фото категорії оновлено.",reply_markup=admin_kb())
+    if s=='productphoto':
+        p=product(f['ck'],f['bk'],f['i']);
+        if p:p['photo']=pid;save_catalog()
+        context.user_data.pop('admin_flow');return await update.message.reply_text("✅ Фото товару оновлено.",reply_markup=admin_kb())
+    if s=='addphoto':f['photo']=pid;f['step']='addstock';return await update.message.reply_text("Товар у наявності? так/ні")
+
+# order details admin
+async def admin_order_detail(update,context):
+    oid=update.callback_query.data.split(":",2)[2]
+    o=next((x for x in orders() if str(x.get('order_id'))==str(oid)),None)
+    if not o:return await show(update,'❌ Замовлення не знайдено.')
+    await show(update,admin_order_text(o),order_status_kb(oid))
+
+async def fallback_cb(update,context): await ack(update.callback_query);await show(update,tr(update.effective_user.id,'menu'),main_kb(update.effective_user.id))
+async def error_handler(update,context):log.exception('Unhandled error',exc_info=context.error)
+
+async def post_init(app):
+    await app.bot.delete_webhook(drop_pending_updates=True)
+
+def build_app():
+    app=(ApplicationBuilder().token(BOT_TOKEN).concurrent_updates(False).post_init(post_init).build())
+    app.add_handler(CommandHandler('start',start));app.add_handler(CommandHandler('admin',admin_cmd))
+    app.add_handler(CallbackQueryHandler(language_cb,r'^lang:'));app.add_handler(CallbackQueryHandler(language,r'^language$'));app.add_handler(CallbackQueryHandler(main,r'^main$'))
+    app.add_handler(CallbackQueryHandler(catalog,r'^catalog$'));app.add_handler(CallbackQueryHandler(category,r'^cat:'));app.add_handler(CallbackQueryHandler(brand_cb,r'^brand:'));app.add_handler(CallbackQueryHandler(product_cb,r'^product:'));app.add_handler(CallbackQueryHandler(add,r'^add:'))
+    app.add_handler(CallbackQueryHandler(cart,r'^cart$'));app.add_handler(CallbackQueryHandler(remove_last,r'^remove_last$'));app.add_handler(CallbackQueryHandler(clear_cart,r'^clear_cart$'));app.add_handler(CallbackQueryHandler(checkout,r'^checkout$'));app.add_handler(CallbackQueryHandler(payment,r'^payment:'));app.add_handler(CallbackQueryHandler(order_cb,r'^order:'));app.add_handler(CallbackQueryHandler(feedback,r'^feedback$'));app.add_handler(CallbackQueryHandler(feedback_cb,r'^feedback:'))
+    app.add_handler(CallbackQueryHandler(admin_order_detail,r'^adm:order:'))
+    app.add_handler(CallbackQueryHandler(admin_cb,r'^adm:'))
+    app.add_handler(MessageHandler(filters.PHOTO,photo_router));app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_router));app.add_handler(CallbackQueryHandler(fallback_cb))
+    app.add_error_handler(error_handler);return app
+
+if __name__=='__main__':
+    log.info('Bot started; admins=%s',sorted(ADMIN_IDS));build_app().run_polling(drop_pending_updates=True)
